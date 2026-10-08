@@ -1,0 +1,24 @@
+{
+  "name": "vibe-seller-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "vibe-seller 的 TypeScript 迁移基座：Agent Core + Runtime（pi Agent SDK 架构，Phase 1）",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "bridge:build": "node packages/bridge/build.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.4"
+  },
+  "packages/server/dependencies": {
+    "@vibe/bridge": "*"
+  }
+}

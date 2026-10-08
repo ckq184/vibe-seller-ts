@@ -1,0 +1,12 @@
+{
+  "name": "@vibe/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "纯领域契约与确定性循环：无 SDK 依赖、无副作用",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

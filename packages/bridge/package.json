@@ -1,0 +1,14 @@
+{
+  "name": "@vibe/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@vibe/core": "*",
+    "@vibe/runtime": "*",
+    "@vibe/adapters-pi": "*"
+  }
+}
