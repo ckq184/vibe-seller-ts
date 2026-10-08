@@ -11,6 +11,9 @@ import { getCurrentUser, type AuthContext } from "./auth";
 import { ACTIVE, canTransition, DESIGNABLE, RETRIABLE, STARTABLE, WAKEABLE } from "./task_states";
 import { AGENT_REPORTED } from "./agent/outcome";
 import { ActiveTaskError, deleteTaskCascade } from "./scheduler/reapers";
+import * as telemetry from "./telemetry/core";
+import { TelemetryEvent } from "./telemetry/events";
+import { profileKindForId } from "./telemetry/tasks";
 import type { TaskOrchestrator } from "./agent/orchestrator";
 import type { ServerConfig } from "./config";
 
@@ -227,6 +230,14 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
     } catch {
       /* best-effort */
     }
+    // 原 stores.py:98：commit 后统计（含新店）→ is_first_store = count <= 1
+    const existingCount = (db.prepare("SELECT COUNT(*) AS n FROM stores").get() as { n: number }).n;
+    telemetry.send(TelemetryEvent.STORE_CREATED, {
+      browser_backend: body.browser_backend ?? "chrome",
+      platform_count: (body.platforms ?? ["amazon"]).length,
+      country_count: (body.countries ?? ["US"]).length,
+      is_first_store: existingCount <= 1,
+    });
     const row = db.prepare("SELECT * FROM stores WHERE id = ?").get(id) as unknown as StoreRow;
     return c.json(storeResponse(row));
   });
@@ -300,13 +311,27 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       .prepare("SELECT COUNT(*) AS n FROM tasks WHERE store_id = ? AND status IN ('designing','running','queued')")
       .get(storeId) as { n: number };
     if (blocking.n > 0) throw new HttpError(409, "Cannot delete store with active tasks");
+    // 遥测快照要在级联删除抹掉行之前取（原 stores.py:293-301 注释同义）
+    const taskCountAtDeletion = (db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE store_id = ?").get(storeId) as { n: number }).n;
     // 清理引用表（SQLite 无级联，与原实现同序）；browser 停止属 4.6
     db.prepare("DELETE FROM store_email_links WHERE store_id = ?").run(storeId);
     db.prepare("DELETE FROM browser_sessions WHERE store_id = ?").run(storeId);
     db.prepare("DELETE FROM schedules WHERE store_id = ?").run(storeId);
     db.prepare("DELETE FROM tasks WHERE store_id = ?").run(storeId);
     db.prepare("UPDATE events SET store_id = NULL WHERE store_id = ?").run(storeId);
+    // 店铺年龄（天）：created_at 解析失败 → unknown（原 stores.py:336-343）
+    let ageDays: number | null = null;
+    if (store.created_at) {
+      const createdMs = Date.parse(store.created_at);
+      if (!Number.isNaN(createdMs)) ageDays = (Date.now() - createdMs) / 86_400_000;
+    }
     db.prepare("DELETE FROM stores WHERE id = ?").run(storeId);
+    // 原 stores.py:348：删除落库后发
+    telemetry.send(TelemetryEvent.STORE_DELETED, {
+      browser_backend: store.browser_backend,
+      task_count_at_deletion_bucket: telemetry.countBucket(taskCountAtDeletion || 0),
+      age_bucket: telemetry.ageBucketDays(ageDays),
+    });
     const deleteFiles = c.req.query("delete_files") === "true";
     if (deleteFiles) {
       try {
@@ -421,6 +446,17 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
     const payload = taskResponse(row, creatorNames(db, [row]));
     // 先 task_created 后 task_update 的顺序是客户端依赖的契约
     bus.emit("task_created", { task_id: id, store_id: row.store_id, task: payload });
+    // 遥测 task_created 与 SSE 总线的 task_created 同名不同物（PRD §3.3：两链路分开建模）。
+    // 原 routers/tasks.py:198：plan_mode 取推导后的实际值。
+    telemetry.send(TelemetryEvent.TASK_CREATED, {
+      is_store_task: row.store_id !== null,
+      plan_mode: Boolean(planMode),
+      has_schedule: row.schedule_id !== null,
+      has_parent: row.parent_task_id !== null,
+      ai_profile_kind: profileKindForId(config.homeDir, row.ai_profile_id),
+      description_length_bucket: telemetry.lengthBucket((row.description ?? "").length),
+      created_by_role: user.role,
+    });
     // defer_start / 执行编排（队列→agent）留 4.3：任务停在 pending
     void body.defer_start;
     return c.json(payload);

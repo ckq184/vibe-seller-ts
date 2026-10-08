@@ -8,6 +8,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
+import * as telemetry from "../telemetry/core";
+import { BrowserFailureReason, TelemetryEvent } from "../telemetry/events";
 
 export type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -250,40 +252,97 @@ export async function killAndRelaunchZiniao(socketPort: number, clientPath: stri
 }
 
 /** ensure_ziniao_running：探活 → WSL 指引 → normal mode 报错 → 自动拉起 → 探活 60s。
- * 返回 true = 可达；失败抛 Error/ZiniaoNormalModeError。 */
+ * 返回 true = 可达；失败抛 Error/ZiniaoNormalModeError。
+ * 遥测面（原 ziniao_utils.py:619-772 逐点移植）：attempted 每次探活一条；
+ * started 判定 = 连通即成功（statusCode≠0 仍算）；failed 的 error_category ∈
+ * BrowserFailureReason。 */
 export async function ensureZiniaoRunning(socketPort: number, clientPath: string, userInfo: ZiniaoUserInfo, fetchImpl?: FetchImpl): Promise<boolean> {
+  const runtimeOs = telemetry.runtimeOs();
+
+  const fireFailed = (category: string, attempts: number): void => {
+    try {
+      telemetry.send(TelemetryEvent.BROWSER_SESSION_FAILED, {
+        backend: "ziniao",
+        os: runtimeOs,
+        attempts_total: attempts,
+        error_category: category,
+      });
+    } catch {
+      /* 遥测不影响主流程 */
+    }
+  };
+
   const probeTimeoutMs = isWsl() ? 3000 : 10_000;
   const probe = probePayload(userInfo);
+  try {
+    telemetry.send(TelemetryEvent.BROWSER_SESSION_ATTEMPTED, { backend: "ziniao", os: runtimeOs, attempt_number: 1 });
+  } catch {
+    /* 遥测不影响主流程 */
+  }
   const { result } = await tryConnectZiniao(socketPort, probe, probeTimeoutMs, fetchImpl);
   if (result !== null) {
     // 紫鸟在凭据错误时也回响应（statusCode != 0）——可达即成功，状态校验交给调用方。
+    try {
+      telemetry.send(TelemetryEvent.BROWSER_SESSION_STARTED, {
+        backend: "ziniao",
+        os: runtimeOs,
+        attempts_to_success: 1,
+        auto_launched: false,
+      });
+    } catch {
+      /* 遥测不影响主流程 */
+    }
     return true;
   }
   if (isWsl()) {
     if (isZiniaoProcessRunning()) {
+      fireFailed(BrowserFailureReason.WSL_WRONG_PORT, 1);
       throw new Error(
         `Ziniao is running on Windows but not listening on port ${socketPort}. Please close Ziniao and re-launch it using the ziniao_webdriver.bat script.\nDownload: /api/ziniao/launcher`,
       );
     }
+    fireFailed(BrowserFailureReason.WSL_NOT_RUNNING, 1);
     throw new Error(
       "Ziniao is not running. WSL cannot launch Ziniao automatically.\nPlease download and run the launcher script on Windows:\n  1. Download: /api/ziniao/launcher\n  2. Double-click ziniao_webdriver.bat\n  3. Wait for \"ready\" message, then retry",
     );
   }
   if (isZiniaoProcessRunning()) {
     if (process.platform === "darwin" || process.platform === "win32") {
+      fireFailed(BrowserFailureReason.NORMAL_MODE, 1);
       throw new ZiniaoNormalModeError();
     }
+    fireFailed(BrowserFailureReason.WRONG_PORT, 1);
     throw new Error(`Ziniao is already running but not listening on port ${socketPort}. Please close Ziniao and try again so it can be auto-launched with the correct port.`);
   }
   try {
     spawnDetached(buildLaunchCmd(clientPath, socketPort));
   } catch (e) {
+    fireFailed(BrowserFailureReason.LAUNCH_FAILED, 1);
     throw new Error(`Failed to launch Ziniao client: ${e instanceof Error ? e.message : String(e)}`);
   }
   for (let i = 0; i < 30; i++) {
+    try {
+      // attempt_number 从 2 起（1 是初始探活，原实现同注释）
+      telemetry.send(TelemetryEvent.BROWSER_SESSION_ATTEMPTED, { backend: "ziniao", os: runtimeOs, attempt_number: i + 2 });
+    } catch {
+      /* 遥测不影响主流程 */
+    }
     await sleep(2000);
     const { result: retry } = await tryConnectZiniao(socketPort, probe, 10_000, fetchImpl);
-    if (retry !== null) return true;
+    if (retry !== null) {
+      try {
+        telemetry.send(TelemetryEvent.BROWSER_SESSION_STARTED, {
+          backend: "ziniao",
+          os: runtimeOs,
+          attempts_to_success: i + 2,
+          auto_launched: true,
+        });
+      } catch {
+        /* 遥测不影响主流程 */
+      }
+      return true;
+    }
   }
+  fireFailed(BrowserFailureReason.STARTUP_TIMEOUT, 31);
   throw new Error("Ziniao startup timed out after 60 seconds");
 }

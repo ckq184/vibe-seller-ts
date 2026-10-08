@@ -234,11 +234,11 @@ describe("SSE 与 telemetry", () => {
     await res.body?.cancel();
   });
 
-  it("telemetry/locale：en/zh ok，其余 ok:false", async () => {
+  it("telemetry/locale：白名单 en/zh 原样；其余归一 unknown；恒 ok:true（原 routers/telemetry.py 契约，批次 4.7 点亮）", async () => {
     const ok = await (await app.request("/api/telemetry/locale", { method: "POST", body: JSON.stringify({ locale: "zh" }), headers: { "content-type": "application/json" } })).json();
     expect(ok).toEqual({ ok: true, locale: "zh" });
     const bad = await (await app.request("/api/telemetry/locale", { method: "POST", body: JSON.stringify({ locale: "fr" }), headers: { "content-type": "application/json" } })).json();
-    expect(bad).toEqual({ ok: false, locale: "fr" });
+    expect(bad).toEqual({ ok: true, locale: "unknown" });
   });
 });
 

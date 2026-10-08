@@ -31,6 +31,8 @@ import { registerVisionRoutes } from "./routes_vision";
 import { registerAttachmentRoutes } from "./routes_attachments";
 import { BrowserStarter } from "./browser/starter";
 import * as gws from "./workspace/gws";
+import * as telemetry from "./telemetry/core";
+import { TelemetryEvent } from "./telemetry/events";
 import { WorkspaceManager } from "./workspace/manager";
 import { KnowledgeSyncManager, SkillsSyncManager } from "./workspace/sync";
 import { WorkspaceAssistantManager } from "./workspace/assistant";
@@ -117,6 +119,26 @@ function serverTimezone(): string {
   }
 }
 
+// _bucket_setting_value（app_settings.py:58）移植：设置值 → 隐私安全的遥测摘要。
+// 差异注释：原用 int(value)（'30.5' → 失败）；TS 用 parseInt（'30.5' → 30）——
+// 可达值恒为 PUT 归一化后的整数字符串，两者无可观测差异。
+function bucketSettingValue(key: string, value: string): string | number | boolean | null {
+  if (["auth_required", "telemetry_enabled", "browser_headless", "skills_auto_sync_enabled"].includes(key)) {
+    return value === "true";
+  }
+  if (key === "max_agent_concurrency") {
+    const n = Number.parseInt(value, 10);
+    return Number.isNaN(n) ? null : n;
+  }
+  if (key === "default_schedule_phase_mode") return value;
+  if (key === "default_schedule_timezone") return telemetry.tzContinentBucket(value);
+  if (key === "task_retention_days") {
+    const n = Number.parseInt(value, 10);
+    return Number.isNaN(n) ? null : telemetry.retentionDaysBucket(n);
+  }
+  return null;
+}
+
 export function createApp(deps: AppDeps): Hono {
   const { config, jwtSecret, db, bus } = deps;
   const auth: AuthContext = { db, jwtSecret };
@@ -191,8 +213,11 @@ export function createApp(deps: AppDeps): Hono {
   app.patch("/api/auth/me/debug-mode", async (c) => {
     const user = getCurrentUser(c, auth);
     const body = (await c.req.json().catch(() => ({}))) as { debug_mode?: boolean };
-    db.prepare("UPDATE users SET debug_mode = ?, updated_at = ? WHERE id = ?").run(body.debug_mode ? 1 : 0, nowIso(), user.id);
-    return c.json({ ok: true, debug_mode: Boolean(body.debug_mode) });
+    const debugMode = Boolean(body.debug_mode);
+    db.prepare("UPDATE users SET debug_mode = ?, updated_at = ? WHERE id = ?").run(debugMode ? 1 : 0, nowIso(), user.id);
+    // 原 routers/auth.py:119 toggle_debug_mode：变更即发（bool(body.get('debug_mode', False))）
+    telemetry.send(TelemetryEvent.USER_PREF_CHANGED, { key: "debug_mode", to_value: debugMode });
+    return c.json({ ok: true, debug_mode: debugMode });
   });
 
   app.patch("/api/auth/me/password", async (c) => {
@@ -214,6 +239,14 @@ export function createApp(deps: AppDeps): Hono {
       plan_mode_default?: boolean;
       sync_profile_to_schedules?: boolean;
     };
+    // 原 routers/auth.py change_profile：仅在实际变更分支发 user_pref_changed
+    //（body 值与当前值比较）。更新本身保持既有无条件写语义不变。
+    if (body.plan_mode_default !== undefined && body.plan_mode_default !== Boolean(user.plan_mode_default)) {
+      telemetry.send(TelemetryEvent.USER_PREF_CHANGED, { key: "plan_mode_default", to_value: Boolean(body.plan_mode_default) });
+    }
+    if (body.sync_profile_to_schedules !== undefined && body.sync_profile_to_schedules !== Boolean(user.sync_profile_to_schedules)) {
+      telemetry.send(TelemetryEvent.USER_PREF_CHANGED, { key: "sync_profile_to_schedules", to_value: Boolean(body.sync_profile_to_schedules) });
+    }
     db.prepare(
       "UPDATE users SET username = ?, email = ?, plan_mode_default = ?, sync_profile_to_schedules = ?, updated_at = ? WHERE id = ?",
     ).run(
@@ -238,7 +271,13 @@ export function createApp(deps: AppDeps): Hono {
     if (!("telemetry_enabled" in settings)) settings.telemetry_enabled = "true";
     if (!("browser_headless" in settings)) settings.browser_headless = "false";
     if (!("skills_auto_sync_enabled" in settings)) settings.skills_auto_sync_enabled = SKILLS_AUTO_SYNC_DEFAULT;
+    // env 变量选择退出要反映到前端读到的值（app_settings.py:122），前端才不会
+    // 在后端静默时初始化自己的 PostHog。
+    if (telemetry.disabledViaEnv()) settings.telemetry_enabled = "false";
     settings.max_upload_size = String(MAX_UPLOAD_SIZE);
+    // install_id 供前端 PostHog 复用同一 distinct_id（app_settings.py:129）
+    const installId = telemetry.getInstallId();
+    if (installId) settings.install_id = installId;
     return c.json(settings);
   });
 
@@ -248,6 +287,7 @@ export function createApp(deps: AppDeps): Hono {
     const upsert = db.prepare(
       "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     );
+    const accepted: [string, string][] = [];
     for (const [key, value] of Object.entries(body)) {
       if (!ALLOWED_KEYS.has(key)) continue; // 未知键静默忽略
       let normalized: string;
@@ -264,7 +304,19 @@ export function createApp(deps: AppDeps): Hono {
       } else {
         normalized = String(value);
       }
+      accepted.push([key, normalized]);
       upsert.run(key, normalized);
+    }
+    // 顺序红线（PRD §3.2 / 原 app_settings.py:213-218）：写库后先重读
+    // telemetry_enabled 行更新 db_disabled 缓存，再发 setting_changed——
+    // 否则 false→true 重新启用的那次事件本身会被门控拦掉。
+    if ("telemetry_enabled" in body) {
+      const row = getSetting(db, "telemetry_enabled");
+      telemetry.setDbDisabled(row === "false");
+    }
+    // 每个接受的 key 一条事件，值按 _bucket_setting_value 分桶
+    for (const [key, value] of accepted) {
+      telemetry.send(TelemetryEvent.SETTING_CHANGED, { key, to_value: bucketSettingValue(key, value) });
     }
     return c.json({ ok: true });
   });
@@ -309,6 +361,11 @@ export function createApp(deps: AppDeps): Hono {
     }
     skillsSync.markGwsInstalled(true);
     writeGwsEnabled(true);
+    // 原 app_settings.py:334：技能装完才发 enabled（success/count 分桶）
+    telemetry.send(TelemetryEvent.INTEGRATION_GWS_ENABLED, {
+      success: Boolean(result.installed),
+      skill_count_bucket: telemetry.countBucket(Number(result.count) || 0),
+    });
     return c.json({ ok: true, installed: result.installed, count: result.count, subskills: result.subskills });
   });
 
@@ -318,6 +375,7 @@ export function createApp(deps: AppDeps): Hono {
     const result = await gws.uninstallSkills(config.homeDir);
     skillsSync.markGwsInstalled(false);
     writeGwsEnabled(false);
+    telemetry.send(TelemetryEvent.INTEGRATION_GWS_DISABLED, {});
     return c.json({ ok: true, removed: result.removed });
   });
 
@@ -339,12 +397,15 @@ export function createApp(deps: AppDeps): Hono {
     if (exists) throw new HttpError(409, "Username or email already registered");
     const id = crypto.randomUUID();
     const now = nowIso();
+    const role = body.role ?? "member";
     db.prepare(
       `INSERT INTO users (id, username, email, password_hash, role, is_active, avatar_url,
                           plan_mode_default, debug_mode, default_profile_id, sync_profile_to_schedules,
                           created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 1, NULL, 0, 0, 'default', 0, ?, ?)`,
-    ).run(id, username, body.email ?? null, hashPassword(body.password), body.role ?? "member", now, now);
+    ).run(id, username, body.email ?? null, hashPassword(body.password), role, now, now);
+    // 原 users.py:74：commit 后发
+    telemetry.send(TelemetryEvent.ADMIN_USER_CREATED, { role });
     return c.json(userResponse(getUserById(db, id)!));
   });
 
@@ -378,15 +439,26 @@ export function createApp(deps: AppDeps): Hono {
     requireAdmin(c, auth);
     const userId = c.req.param("user_id");
     if (userId === DEFAULT_USER_ID || userId === AI_BOT_USER_ID) throw new HttpError(400, "Cannot delete system user");
+    // 原 users.py delete_user：deleted_role 在删除前取；账号不存在时不发
+    //（原 404；TS 保持既有幂等删除语义不变，仅事件面对齐"存在才发"）。
+    const target = getUserById(db, userId);
+    const deletedRole = target?.role;
     db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    if (deletedRole) telemetry.send(TelemetryEvent.ADMIN_USER_DELETED, { role: deletedRole });
     return c.json({ ok: true });
   });
 
   // ── telemetry ──
+  // 原 routers/telemetry.py：免认证（i18n 在登录前启动）；白名单 {en,zh} 否则
+  // 'unknown'；返回恒 {'ok': True, 'locale': locale}。
+  // 差异注释：原实现 payload 用 pydantic max_length=16（>16 → 422）；本批按任务
+  // 预裁决为 ≤16 截断（沿用既有桩语义），仅此一处形状差异。
   app.post("/api/telemetry/locale", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { locale?: string };
-    const locale = (body.locale ?? "").slice(0, 16);
-    return c.json({ ok: locale === "en" || locale === "zh", locale });
+    const raw = (body.locale ?? "").slice(0, 16);
+    const locale = raw === "en" || raw === "zh" ? raw : "unknown";
+    telemetry.setAppLocale(locale);
+    return c.json({ ok: true, locale });
   });
 
   // ── SSE（免认证广播；data: 一行 JSON，30s ping，与原契约一致） ──

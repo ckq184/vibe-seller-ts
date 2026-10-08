@@ -12,6 +12,8 @@ import { EmailStore } from "./email/db";
 import { sendEmail, type EmailAccountRow } from "./email/sender";
 import { pollLink, syncAccountEmails, POLL_COOLDOWN_SECONDS } from "./channels/emailPoller";
 import { discoverImap, discoverSmtp } from "./channels/discovery";
+import * as telemetry from "./telemetry/core";
+import { TelemetryEvent } from "./telemetry/events";
 import { randomUUID } from "node:crypto";
 
 export interface EmailDeps {
@@ -143,11 +145,18 @@ export function registerEmailRoutes(app: Hono, deps: EmailDeps): void {
 
     const id = randomUUID();
     const now = new Date().toISOString();
+    const useSsl = body.use_ssl === undefined ? true : Boolean(body.use_ssl);
     db.prepare(
       `INSERT INTO email_accounts (id, email, encrypted_password, imap_host, imap_port, use_ssl,
                                    smtp_host, smtp_port, smtp_use_tls, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, email, encrypt(String(body.password)), imapHost, imapPort, body.use_ssl === undefined ? 1 : body.use_ssl ? 1 : 0, smtpHost, smtpPort, smtpUseTls ? 1 : 0, user.id, now, now);
+    ).run(id, email, encrypt(String(body.password)), imapHost, imapPort, useSsl ? 1 : 0, smtpHost, smtpPort, smtpUseTls ? 1 : 0, user.id, now, now);
+    // 原 email_accounts.py:194：commit 后发（has_smtp 取自动发现后的 smtp_host）
+    telemetry.send(TelemetryEvent.EMAIL_ACCOUNT_ADDED, {
+      provider_kind: telemetry.emailProviderKind(email),
+      has_smtp: Boolean(smtpHost),
+      use_ssl: useSsl,
+    });
     return c.json(rowToResponse(getAccountOr404(db, id)));
   });
 
@@ -191,6 +200,7 @@ export function registerEmailRoutes(app: Hono, deps: EmailDeps): void {
     const account = getAccountOr404(db, c.req.param("account_id") ?? "");
     db.prepare("DELETE FROM store_email_links WHERE email_account_id = ?").run(account.id);
     db.prepare("DELETE FROM email_accounts WHERE id = ?").run(account.id);
+    telemetry.send(TelemetryEvent.EMAIL_ACCOUNT_REMOVED, {});
     return c.json({ ok: true });
   });
 

@@ -14,6 +14,7 @@ import { createTranslator, defaultBudget, type RunFactoryResult } from "@vibe/br
 import type { DatabaseSync } from "node:sqlite";
 import type { ServerConfig } from "../config";
 import { canTransition } from "../task_states";
+import { sendTaskCompleted, sendTaskFailed, sendTaskResumed, TaskFailureCategory, TaskFailurePhase } from "../telemetry/tasks";
 import { applyOutcome, resolveOutcome } from "./outcome";
 import { buildRunPrompt, type RunMode } from "./prompt";
 
@@ -67,6 +68,8 @@ interface RunEntry {
   resuming?: boolean;
   /** 停止已请求。与闸门锁存的到达顺序不定：锁存在后也要补终局。 */
   stopRequested?: boolean;
+  /** 事件流崩溃（未处理异常）：终局 phase 记 'pipeline'（原 TaskFailurePhase 映射）。 */
+  pipelineError?: boolean;
 }
 
 export type EnqueueResult = "launched" | "queued" | "rejected";
@@ -118,6 +121,8 @@ export class TaskOrchestrator {
    * 无店铺任务拒绝。状态转移由本方法执行（queued→running 的转移在排水时发生）。
    */
   enqueueOrLaunch(taskId: string, opts: LaunchOptions): EnqueueResult {
+    // 唤醒遥测（原 execute_woken_task 入口）：必须在清 wait_condition / 状态转移前读
+    if (opts.mode === "woken") sendTaskResumed(this.deps.db, this.deps.config.homeDir, taskId);
     const max = this.deps.maxConcurrent ?? 2;
     const storeId = this.storeOf(taskId);
     if (this.storeBusy(storeId) || this.active >= max) {
@@ -177,6 +182,14 @@ export class TaskOrchestrator {
           taskId,
         );
         this.deps.bus.emit("task_update", { task_id: taskId, status: "failed", error: `engine factory failed: ${message}` });
+        // 遥测：run 尚未起飞即失败 → phase=pre_running（原 pre-run 检查失败路径的
+        // TS 等价点）；error_category 已落 DB（'engine_factory_failed'），优先于兜底。
+        const fresh = db.prepare("SELECT id, store_id, schedule_id, plan_mode, ai_profile_id, started_at, completed_at, error_category FROM tasks WHERE id = ?").get(taskId) as
+          | Parameters<typeof sendTaskFailed>[2]
+          | undefined;
+        if (fresh) {
+          sendTaskFailed(db, config.homeDir, fresh, TaskFailurePhase.PRE_RUNNING, TaskFailureCategory.AGENT_SET_ERROR);
+        }
       }
       return;
     }
@@ -331,6 +344,7 @@ export class TaskOrchestrator {
         }
       } catch (err: unknown) {
         console.error(`[vibe-orchestrator] run ${entry.runId} stream crashed:`, err);
+        entry.pipelineError = true; // 未处理异常 → 终局遥测记 pipeline（原 UNHANDLED_EXCEPTION 路径）
       }
       try {
         await handle.done;
@@ -366,7 +380,7 @@ export class TaskOrchestrator {
     entry: RunEntry,
     done: { status: string; result_text: string; error_code?: string },
   ): void {
-    const { db, bus } = this.deps;
+    const { db, bus, config } = this.deps;
     entry.finished = true;
     entry.awaiting = false;
     const now = new Date().toISOString();
@@ -425,6 +439,27 @@ export class TaskOrchestrator {
         now,
         entry.taskId,
       );
+    }
+
+    // 终局遥测（原 task_runner_exec 各终局点的 TS 汇聚处；PRD §3.3"orchestrator
+    // 终局裁决"）。phase 映射：run 未起飞 → pre_running（start() 工厂失败处已发）；
+    // 事件流崩溃 → pipeline；其余 → running。completed 走统计（失败静默降级仍发送）。
+    if (moved && (target === "completed" || target === "failed")) {
+      const fresh = db
+        .prepare("SELECT id, store_id, schedule_id, plan_mode, ai_profile_id, started_at, completed_at, error_category FROM tasks WHERE id = ?")
+        .get(entry.taskId) as Parameters<typeof sendTaskCompleted>[2] | undefined;
+      if (fresh) {
+        if (target === "completed") sendTaskCompleted(db, config.homeDir, fresh);
+        else {
+          sendTaskFailed(
+            db,
+            config.homeDir,
+            fresh,
+            entry.pipelineError ? TaskFailurePhase.PIPELINE : TaskFailurePhase.RUNNING,
+            entry.pipelineError ? TaskFailureCategory.UNHANDLED_EXCEPTION : TaskFailureCategory.NO_RESULT,
+          );
+        }
+      }
     }
 
     bus.emit("agent_done", {

@@ -4,13 +4,15 @@
 //     RUN_IN_NEW_TAB 国家冲突维度属浏览器层（4.6）——浏览器会话恒 idle 时其决策
 //     退化为"恒可并发"，这里保守串行 per-store，宁排队不撞浏览器。
 //   - two_phase 的 L2 前置不做 catalog staleness 检查（knowledge_sync 属 4.5 workspace）。
-//   - 邮件/遥测面（telemetry.send）未移植，属 4.6/4.7。
+// 批次 4.7：schedule_fired 遥测接线（仅 fanout/single——原 cron._run_task_job 不发）。
 
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_USER_ID } from "../config";
 import type { ServerConfig } from "../config";
 import { canTransition } from "../task_states";
+import * as telemetry from "../telemetry/core";
+import { TelemetryEvent } from "../telemetry/events";
 import type { TaskOrchestrator } from "../agent/orchestrator";
 
 export interface SchedulerDeps {
@@ -243,6 +245,13 @@ export function runFanoutJob(
   }
   const twoPhase = sched.phase_mode === "two_phase";
   const stores = deps.db.prepare("SELECT id, name FROM stores ORDER BY created_at").all() as unknown as { id: string; name: string }[];
+  // 原 fanout.py:183：店铺清单装载后、建任务前发（空店铺也发——先记录"这把火点了"再警告跳过）
+  telemetry.send(TelemetryEvent.SCHEDULE_FIRED, {
+    schedule_type: sched.schedule_type,
+    phase_mode: sched.phase_mode,
+    fanout_target_count_bucket: telemetry.countBucket(stores.length),
+    is_catalog: sched.staleness_check === "catalog",
+  });
   if (stores.length === 0) return { skipped: true };
 
   const batchId = randomUUID();
@@ -320,6 +329,13 @@ export function runSingleJob(
   }
   cancelPriorWaiting(deps, sched.id, null);
   const profileId = resolveScheduleProfile(deps.db, sched);
+  // 原 fanout.py:339：single 的目标数恒 0、is_catalog 恒 false、phase_mode 硬编码 'single'
+  telemetry.send(TelemetryEvent.SCHEDULE_FIRED, {
+    schedule_type: sched.schedule_type,
+    phase_mode: "single",
+    fanout_target_count_bucket: telemetry.countBucket(0),
+    is_catalog: false,
+  });
   const taskId = insertFireTask(deps, {
     storeId: null,
     scheduleId: sched.id,

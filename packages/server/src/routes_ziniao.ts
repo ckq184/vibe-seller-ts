@@ -10,6 +10,8 @@ import { HttpError } from "./types";
 import { getCurrentUser, type AuthContext } from "./auth";
 import type { ServerConfig } from "./config";
 import { deriveFernetKey, fernetDecryptText, fernetEncrypt } from "./crypto/fernet";
+import * as telemetry from "./telemetry/core";
+import { TelemetryEvent } from "./telemetry/events";
 import { ZiniaoNormalModeError, ensureZiniaoRunning, getZiniaoStatus, killAndRelaunchZiniao, tryConnectZiniao, type FetchImpl, type ZiniaoUserInfo } from "./browser/ziniao";
 
 export interface ZiniaoDeps {
@@ -101,6 +103,9 @@ export function registerZiniaoRoutes(app: Hono, deps: ZiniaoDeps): void {
       now,
       now,
     );
+    // 原 ziniao_accounts.py:86：commit 后统计（含新账号）→ 分桶
+    const total = (db.prepare("SELECT COUNT(*) AS n FROM ziniao_accounts").get() as { n: number }).n;
+    telemetry.send(TelemetryEvent.ZINIAO_ACCOUNT_ADDED, { account_count_after_bucket: telemetry.countBucket(total || 0) });
     return c.json(accountResponse(getAccountOr404(id)));
   });
 
@@ -127,7 +132,11 @@ export function registerZiniaoRoutes(app: Hono, deps: ZiniaoDeps): void {
   app.delete("/api/ziniao-accounts/:account_id", (c) => {
     getCurrentUser(c, auth);
     const account = db.prepare("SELECT * FROM ziniao_accounts WHERE id = ?").get(c.req.param("account_id") ?? "") as ZiniaoAccountRow | undefined;
-    if (account) db.prepare("DELETE FROM ziniao_accounts WHERE id = ?").run(account.id);
+    if (account) {
+      db.prepare("DELETE FROM ziniao_accounts WHERE id = ?").run(account.id);
+      // 原 ziniao_accounts.py:131：仅账号存在才发
+      telemetry.send(TelemetryEvent.ZINIAO_ACCOUNT_REMOVED, {});
+    }
     // 原实现：不存在也返回 {ok:true}
     return c.json({ ok: true });
   });
