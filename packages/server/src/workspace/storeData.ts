@@ -4,6 +4,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeTextSync } from "./textio";
 
 // ── 写一次模板（templates.py） ──
 
@@ -147,7 +148,7 @@ export function migrateStoreData(root: string): { migrated: boolean; moved: stri
   mkdirSync(storeData, { recursive: true });
   relocateStoreSubdirs(root, moved);
   bucketDatedFiles(storeData, moved);
-  writeFileSync(marker, `${LAYOUT_VERSION}\n`);
+  writeTextSync(marker, `${LAYOUT_VERSION}\n`);
   return { migrated: moved.length > 0, moved };
 }
 
@@ -251,12 +252,11 @@ export function collectStoreEntries(root: string): StoreEntry[] {
 export function writeCatalogStub(storeDir: string, slug: string, name: string): string {
   const catalogMd = join(storeDir, "CATALOG.md");
   if (existsSync(catalogMd)) return catalogMd;
-  writeFileSync(
+  writeTextSync(
     catalogMd,
     `# Store Catalog — ${name} (stub)\n\n` +
       "| File | Relevance | Summary |\n|---|---|---|\n" +
       `| stores/${slug}/STORE.md | profile | Store profile |\n`,
-    "utf8",
   );
   return catalogMd;
 }

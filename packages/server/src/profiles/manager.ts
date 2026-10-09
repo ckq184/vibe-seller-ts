@@ -5,7 +5,8 @@
 // 运行时派生（deriveVibeProfile）只在内存里把 env 转成 pi 引擎的 profile——密钥
 // 值进 buildPi 后绝不打印、绝不入事件/日志/RunLog/SSE 帧。
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeTextSync } from "../workspace/textio";
 import { dirname, join } from "node:path";
 import type { VibeProfile } from "@vibe/bridge";
 import { DEFAULT_PROFILE_ID, DEFAULT_PROFILES, PROVIDER_MODELS, PROVIDER_PRESETS } from "./presets";
@@ -40,7 +41,8 @@ export class ProfileManager {
 
   save(profiles: ProfilesFile): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, JSON.stringify(profiles, null, 2), "utf8");
+    // 原 profiles.json 经 Python 文本模式写（win32 CRLF）——textio 对齐
+    writeTextSync(this.path, JSON.stringify(profiles, null, 2));
   }
 
   getProfile(profileId: string): UiProfile | undefined {

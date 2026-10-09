@@ -35,6 +35,24 @@ interface ZiniaoAccountRow {
   updated_at: string | null;
 }
 
+/**
+ * Python json.dumps(obj) 的默认分隔符形状（', ' / ': '）——502 detail 是
+ * json.dumps(status) 的字符串（原 ziniao_accounts.py），前端 JSON.parse 回读。
+ * 批次 4.7.2 录制回放对齐：JSON.stringify 无空格（'{"status":"not_running"}'
+ * vs 原 '{"status": "not_running"}'）。状态对象值都是字符串/数字，逐值
+ * JSON.stringify 转义安全。
+ */
+function pyJsonDumps(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.map(pyJsonDumps).join(", ")}]`;
+  const body = Object.entries(value as Record<string, unknown>)
+    .map(([k, v]) => `${JSON.stringify(k)}: ${pyJsonDumps(v)}`)
+    .join(", ");
+  return `{${body}}`;
+}
+
 function accountResponse(a: ZiniaoAccountRow): Record<string, unknown> {
   // 永不回显 encrypted_password
   return {
@@ -151,12 +169,12 @@ export function registerZiniaoRoutes(app: Hono, deps: ZiniaoDeps): void {
     } catch (e) {
       if (e instanceof ZiniaoNormalModeError) {
         const status = await getZiniaoStatus(account.socket_port ?? 16851, userInfo, fetchImpl);
-        throw new HttpError(502, JSON.stringify(status));
+        throw new HttpError(502, pyJsonDumps(status));
       }
       // 尽力给结构化状态；拿不到就透传原始消息
       try {
         const status = await getZiniaoStatus(account.socket_port ?? 16851, userInfo, fetchImpl);
-        throw new HttpError(502, JSON.stringify(status));
+        throw new HttpError(502, pyJsonDumps(status));
       } catch (inner) {
         if (inner instanceof HttpError) throw inner;
         throw new HttpError(502, e instanceof Error ? e.message : String(e));

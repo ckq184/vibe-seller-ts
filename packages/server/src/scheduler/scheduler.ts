@@ -84,13 +84,17 @@ export class VibeScheduler {
   }
 
   listJobs(): { job_id: string; name: string; next_run: string | null; paused: boolean; trigger: string }[] {
-    return [...this.jobs.values()].map((job) => ({
-      job_id: job.id,
-      name: job.name,
-      next_run: job.nextRunAt ? job.nextRunAt.toISOString() : null,
-      paused: job.paused,
-      trigger: job.triggerDesc,
-    }));
+    // 原 list_cron_jobs 走 APScheduler get_jobs()——按 next_run_time 升序
+    // （批次 4.7.2 录制 fixture 钉死顺序：1m 组 → 5m 组 → 15m → cron 任务）。
+    return [...this.jobs.values()]
+      .sort((a, b) => (a.nextRunAt?.getTime() ?? Infinity) - (b.nextRunAt?.getTime() ?? Infinity))
+      .map((job) => ({
+        job_id: job.id,
+        name: job.name,
+        next_run: job.nextRunAt ? job.nextRunAt.toISOString() : null,
+        paused: job.paused,
+        trigger: job.triggerDesc,
+      }));
   }
 
   /** 推进一拍：所有到点作业开跑（跑者内部自行容错）。测试直接调用以保确定性。 */
@@ -136,6 +140,60 @@ export class VibeScheduler {
 
 // ── schedule → 作业 ──
 
+// ── APScheduler str(trigger) 等价格式（/api/cron/jobs 的 trigger 字段契约，
+// 批次 4.7.2 录制 fixture 钉死）：interval → 'interval[0:01:00]'；
+// cron → "cron[month='1', day='1', hour='3', minute='0']"，字段顺序
+// month day day_of_week hour minute（'*'/null 不受限字段省略）。
+
+/** timedelta str 的 [H:MM:SS] 形状（APScheduler 小时不补零：'0:01:00'）。 */
+function intervalTriggerDesc(ms: number): string {
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  const s = Math.floor((ms % 60_000) / 1000);
+  return `interval[${h}:${pad(m)}:${pad(s)}]`;
+}
+
+function sortedNums(set: Set<number> | null): string | null {
+  if (set === null) return null;
+  return [...set].sort((a, b) => a - b).join(",");
+}
+
+function cronTriggerDesc(fields: CronFields): string {
+  const parts: string[] = [];
+  const month = sortedNums(fields.month);
+  if (month !== null) parts.push(`month='${month}'`);
+  const dom = sortedNums(fields.dom);
+  if (dom !== null) parts.push(`day='${dom}'`);
+  const dow = sortedNums(fields.dow);
+  if (dow !== null) parts.push(`day_of_week='${dow}'`);
+  parts.push(`hour='${sortedNums(fields.hour)}'`);
+  parts.push(`minute='${sortedNums(fields.minute)}'`);
+  return `cron[${parts.join(", ")}]`;
+}
+
+/** schedule 行 → APScheduler 风格 trigger 描述（days interval=1 为 fixture 可观测面）。 */
+function scheduleTriggerDesc(sched: ScheduleRow): string {
+  const h = (sched.schedule_time ?? "00:00").split(":")[0] ?? "0";
+  const m = (sched.schedule_time ?? "00:00").split(":")[1] ?? "0";
+  const interval = Math.max(1, sched.interval_value ?? 1);
+  const hh = String(Number.parseInt(h, 10) || 0);
+  const mm = String(Number.parseInt(m, 10) || 0);
+  if (sched.schedule_type === "minutes") return intervalTriggerDesc(interval * 60_000);
+  if (sched.schedule_type === "hours") return intervalTriggerDesc(interval * 3_600_000);
+  if (sched.schedule_type === "days") {
+    return interval === 1 ? `cron[hour='${hh}', minute='${mm}']` : `cron[day='*/${interval}', hour='${hh}', minute='${mm}']`;
+  }
+  if (sched.schedule_type === "weekly") {
+    // APScheduler 对 day_of_week 输出名字（Mon=0..Sun=6，原 CronTrigger 语义）
+    const names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    const day = sched.schedule_day !== null ? names[(sched.schedule_day - 1) % 7] : undefined;
+    const dayPart = day !== undefined && interval === 1 ? `day_of_week='${day}', ` : "";
+    return `cron[${dayPart}hour='${hh}', minute='${mm}']`;
+  }
+  return `cron[day='${sched.schedule_day ?? 1}', hour='${hh}', minute='${mm}']`;
+}
+
 /** add_schedule_job_for：Schedule 行 → 调度作业（store/fanout/single 按 phase_mode 路由）。 */
 export function addScheduleJobFor(scheduler: VibeScheduler, deps: SchedulerDeps, sched: ScheduleRow): void {
   const nextRunFn = buildTrigger({
@@ -179,7 +237,7 @@ export function addScheduleJobFor(scheduler: VibeScheduler, deps: SchedulerDeps,
     name: sched.title,
     nextRunFn,
     runner,
-    triggerDesc: `${sched.schedule_type}/${sched.interval_value ?? 1}@${sched.schedule_time} ${sched.timezone}`,
+    triggerDesc: scheduleTriggerDesc(sched),
   });
 }
 
@@ -216,7 +274,7 @@ export function addCronJob(
     runner: () => {
       runTaskJob(deps, { taskTitle: opts.taskTitle, storeId: opts.storeId ?? null, scheduleId: null });
     },
-    triggerDesc: opts.cronExpression,
+    triggerDesc: cronTriggerDesc(fields),
   });
 }
 
@@ -244,34 +302,36 @@ export function startScheduler(deps: SchedulerDeps, opts?: { scheduler?: VibeSch
   const interval = (id: string, name: string, ms: number, runner: () => void | Promise<void>) => {
     const start = new Date(Date.now() + ms);
     scheduler.addJob(
-      { id, name, nextRunFn: (after) => new Date(after.getTime() + ms), runner, triggerDesc: `interval ${ms}ms` },
+      { id, name, nextRunFn: (after) => new Date(after.getTime() + ms), runner, triggerDesc: intervalTriggerDesc(ms) },
       { firstFireAfter: start },
     );
     systemJobIds.push(id);
   };
 
+  // name 一律用 runner 函数名——APScheduler 的 job.name 缺省取 func.__name__，
+  // /api/cron/jobs 的 name 字段契约（批次 4.7.2 fixture：'check_waiting_tasks' 等）。
   if (opts?.withSystemJobs !== false) {
-    interval("waiting_checker", "Waiting-task checker", 15 * 60_000, () => {
+    interval("waiting_checker", "check_waiting_tasks", 15 * 60_000, () => {
       checkWaitingTasks(deps);
     });
-    interval("email_sync", "Email sync", 5 * 60_000, () => {
+    interval("email_sync", "sync_all_email_accounts", 5 * 60_000, () => {
       if (deps.emailSyncFn) return void deps.emailSyncFn();
       if (deps.jwtSecret) void syncAllEmailAccounts(deps.db, deps.config.homeDir, deps.jwtSecret).catch(() => undefined);
     });
-    interval("plan_reaper", "Plan reaper", 5 * 60_000, () => {
+    interval("plan_reaper", "reap_stuck_planning_tasks", 5 * 60_000, () => {
       reapStuckPlanningTasks(deps);
     });
-    interval("stall_reaper", "Stall reaper", 60_000, () => {
+    interval("stall_reaper", "reap_stalled_running_tasks", 60_000, () => {
       reapStalledRunningTasks(deps);
     });
-    interval("idle_browser_sweeper", "Idle browser sweeper", 60_000, () => {
+    interval("idle_browser_sweeper", "sweep_idle_browsers", 60_000, () => {
       if (deps.idleSweepFn) return void deps.idleSweepFn();
       if (browserSweeper) {
         const idleS = Number.parseInt(process.env.VIBE_BROWSER_IDLE_S ?? "300", 10);
         void browserSweeper.sweepIdleBrowsers(Number.isNaN(idleS) ? 300 : idleS).catch(() => undefined);
       }
     });
-    interval("finalize_reaper", "Finalize reaper", 60_000, () => {
+    interval("finalize_reaper", "reap_finalized_batches", 60_000, () => {
       reapFinalizedBatches(deps);
     });
     // 每日 03:30 服务器时区（低活跃窗口）
@@ -280,12 +340,12 @@ export function startScheduler(deps: SchedulerDeps, opts?: { scheduler?: VibeSch
     const cleanupFields = parseCronExpression("30 3 * * *");
     scheduler.addJob({
       id: "task_cleanup",
-      name: "Task cleanup",
+      name: "cleanup_old_tasks",
       nextRunFn: (after) => cronNextRun(cleanupFields, after, serverTz),
       runner: () => {
         cleanupOldTasks(deps);
       },
-      triggerDesc: "cron 30 3 * * *",
+      triggerDesc: cronTriggerDesc(cleanupFields),
     });
     systemJobIds.push("task_cleanup");
   }

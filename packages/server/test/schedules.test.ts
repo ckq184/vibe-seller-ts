@@ -407,7 +407,9 @@ describe("cron 端点", () => {
     expect(bad.status).toBe(400);
     const jobs = await getJson<{ job_id: string; next_run: string | null; paused: boolean; trigger: string }[]>("/api/cron/jobs");
     const mine = jobs.find((j) => j.job_id === "job-x")!;
-    expect(mine.trigger).toBe("0 9 * * 1-5");
+    // trigger 字段 = APScheduler str(CronTrigger) 等价格式（批次 4.7.2 录制回放对齐，
+    // 非 cron 原文；字段序 month day day_of_week hour minute，'*' 省略）
+    expect(mine.trigger).toBe("cron[day_of_week='1,2,3,4,5', hour='9', minute='0']");
     expect(mine.paused).toBe(false);
     expect(mine.next_run).toBeTruthy();
     expect((await post("/api/cron/jobs/job-x/pause")).status).toBe(200);

@@ -211,11 +211,15 @@ describe("users 契约（admin）", () => {
     expect((await del.json())).toEqual({ ok: true });
   });
 
-  it("系统用户不可删（400）；重复用户名 409", async () => {
+  it("系统用户不可删（400）；重复用户名 400（原 users.py create_user/delete_user 判定树，批次 4.7.2 对齐）", async () => {
     const del = await app.request(`/api/users/${DEFAULT_USER_ID}`, { method: "DELETE", headers: { cookie: adminCookie } });
     expect(del.status).toBe(400);
+    expect(await del.json()).toEqual({ detail: "Cannot delete yourself" });
+    // 原实现重复用户名是 400 'Username already in use'（非 409；409 只出现在
+    // email-accounts/store-link 等资源族）。
     const dup = await app.request("/api/users", { method: "POST", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ username: "admin", password: "pw" }) });
-    expect(dup.status).toBe(409);
+    expect(dup.status).toBe(400);
+    expect(await dup.json()).toEqual({ detail: "Username already in use" });
   });
 });
 

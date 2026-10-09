@@ -4,7 +4,8 @@
 
 import { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeTextSync } from "./workspace/textio";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HttpError } from "./types";
@@ -48,7 +49,8 @@ export function loadSavedConfigs(homeDir: string): Record<string, { channel_type
 function saveConfigs(homeDir: string, configs: Record<string, unknown>): void {
   const path = join(homeDir, "config", "channels.json");
   mkdirSync(join(homeDir, "config"), { recursive: true });
-  writeFileSync(path, JSON.stringify(configs, null, 2), "utf8");
+  // 原 channels.json 经 Python 文本模式写（win32 CRLF）——textio 对齐
+  writeTextSync(path, JSON.stringify(configs, null, 2));
 }
 
 interface EventRowLite {

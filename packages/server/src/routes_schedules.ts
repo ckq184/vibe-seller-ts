@@ -40,7 +40,12 @@ function scheduleNeedsPlan(sched: ScheduleRow): boolean {
 
 function validateScheduleType(type: string): void {
   if (!VALID_SCHEDULE_TYPES.has(type)) {
-    throw new HttpError(400, `Invalid schedule_type: ${type}. Must be one of minutes,hours,days,weekly,monthly`);
+    // 原 schedules.py _validate_schedule_type 的 detail 文本（批次 4.7.2 对齐）：
+    // "Must be one of ('minutes', 'hours', 'days', 'weekly', 'monthly')"——元组 repr 形状。
+    throw new HttpError(
+      400,
+      `Invalid schedule_type: ${type}. Must be one of ('minutes', 'hours', 'days', 'weekly', 'monthly')`,
+    );
   }
 }
 

@@ -10,7 +10,7 @@ import { extname, join, normalize } from "node:path";
 import bcrypt from "bcryptjs";
 import type { DatabaseSync } from "node:sqlite";
 import type { ServerConfig } from "./config";
-import { AI_BOT_USER_ID, DEFAULT_USER_ID } from "./config";
+import { DEFAULT_USER_ID } from "./config";
 import { getSetting, getUserById, isAuthRequired, type UserRow } from "./db";
 import { createSessionToken, USER_SESSION_EXPIRE_SECONDS } from "./jwt";
 import { getCurrentUser, requireAdmin, userResponse, COOKIE_NAME, type AuthContext } from "./auth";
@@ -224,8 +224,15 @@ export function createApp(deps: AppDeps): Hono {
     const user = getCurrentUser(c, auth);
     const body = (await c.req.json().catch(() => ({}))) as { current_password?: string; new_password?: string };
     if (!body.new_password) throw new HttpError(422, "new_password required");
-    if (body.current_password !== undefined && user.password_hash !== "disabled" && !verifyPassword(body.current_password, user.password_hash)) {
-      throw new HttpError(400, "Current password is incorrect");
+    // 原 routers/auth.py change_password：auth_on 时 current_password 必填且
+    // 必须正确（'Current password is required' / 'Current password is incorrect'）；
+    // auth 关闭时跳过校验（'Skip current_password when auth off'）。
+    // 批次 4.7.2 录制回放对齐：此前 TS 在缺 current_password 时静默放行。
+    if (isAuthRequired(db)) {
+      if (!body.current_password) throw new HttpError(400, "Current password is required");
+      if (user.password_hash !== "disabled" && !verifyPassword(body.current_password, user.password_hash)) {
+        throw new HttpError(400, "Current password is incorrect");
+      }
     }
     db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.new_password), nowIso(), user.id);
     return c.json({ ok: true });
@@ -391,10 +398,16 @@ export function createApp(deps: AppDeps): Hono {
     const body = (await c.req.json().catch(() => ({}))) as { username?: string; email?: string; password?: string; role?: string };
     if (!body.username || !body.password) throw new HttpError(422, "username and password required");
     const username = body.username.toLowerCase();
-    const exists = db
-      .prepare("SELECT id FROM users WHERE username = ? OR (email IS NOT NULL AND email = ?)")
-      .get(username, body.email ?? "\u0000");
-    if (exists) throw new HttpError(409, "Username or email already registered");
+    // 原 users.py create_user：跨列唯一性检查在 INSERT 前做，冲突恒 400
+    //（'Username already in use' / 'Email already in use'）——批次 4.7.2 录制
+    // 回放对齐（此前 TS 误用 409，原实现只有 email-accounts 复用才是 409）。
+    const dupUser = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+    if (dupUser) throw new HttpError(400, "Username already in use");
+    if (body.email) {
+      const dupEmail = db.prepare("SELECT id FROM users WHERE email = ?").get(body.email);
+      if (dupEmail) throw new HttpError(400, "Email already in use");
+    }
+    if (body.role !== undefined && body.role !== "admin" && body.role !== "member") throw new HttpError(400, "Invalid role");
     const id = crypto.randomUUID();
     const now = nowIso();
     const role = body.role ?? "member";
@@ -438,11 +451,15 @@ export function createApp(deps: AppDeps): Hono {
   app.delete("/api/users/:user_id", (c) => {
     requireAdmin(c, auth);
     const userId = c.req.param("user_id");
-    if (userId === DEFAULT_USER_ID || userId === AI_BOT_USER_ID) throw new HttpError(400, "Cannot delete system user");
-    // 原 users.py delete_user：deleted_role 在删除前取；账号不存在时不发
-    //（原 404；TS 保持既有幂等删除语义不变，仅事件面对齐"存在才发"）。
+    // 原 users.py delete_user 判定树（批次 4.7.2 录制回放对齐）：先 404
+    // 'User not found'，再 ai_bot 400 'Cannot delete AI bot user'，再自删
+    // 400 'Cannot delete yourself'。此前的"幂等删除/系统用户"语义是 TS 侧自创。
     const target = getUserById(db, userId);
-    const deletedRole = target?.role;
+    if (!target) throw new HttpError(404, "User not found");
+    if (target.role === "ai_bot") throw new HttpError(400, "Cannot delete AI bot user");
+    if (userId === DEFAULT_USER_ID) throw new HttpError(400, "Cannot delete yourself");
+    // 原 delete_user：删除前取角色；事件面对齐"存在才发"。
+    const deletedRole = target.role;
     db.prepare("DELETE FROM users WHERE id = ?").run(userId);
     if (deletedRole) telemetry.send(TelemetryEvent.ADMIN_USER_DELETED, { role: deletedRole });
     return c.json({ ok: true });
@@ -451,11 +468,29 @@ export function createApp(deps: AppDeps): Hono {
   // ── telemetry ──
   // 原 routers/telemetry.py：免认证（i18n 在登录前启动）；白名单 {en,zh} 否则
   // 'unknown'；返回恒 {'ok': True, 'locale': locale}。
-  // 差异注释：原实现 payload 用 pydantic max_length=16（>16 → 422）；本批按任务
-  // 预裁决为 ≤16 截断（沿用既有桩语义），仅此一处形状差异。
+  // 契约对齐（批次 4.7.2 录制回放发现，修正 4.7.1 的"截断"预裁决）：原实现
+  // LocalePayload 用 pydantic max_length=16，>16 字符 → FastAPI RequestValidationError
+  // 422 {"detail":[{type:'string_too_long',loc:['body','locale'],msg,input,ctx}]}。
+  // TS 侧按同一形状返回（录制 fixture traffic.jsonl / locale_too_long_422 步钉死）。
   app.post("/api/telemetry/locale", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { locale?: string };
-    const raw = (body.locale ?? "").slice(0, 16);
+    const raw = typeof body.locale === "string" ? body.locale : "";
+    if (raw.length > 16) {
+      return c.json(
+        {
+          detail: [
+            {
+              type: "string_too_long",
+              loc: ["body", "locale"],
+              msg: "String should have at most 16 characters",
+              input: raw,
+              ctx: { max_length: 16 },
+            },
+          ],
+        },
+        422,
+      );
+    }
     const locale = raw === "en" || raw === "zh" ? raw : "unknown";
     telemetry.setAppLocale(locale);
     return c.json({ ok: true, locale });
@@ -491,16 +526,20 @@ export function createApp(deps: AppDeps): Hono {
     engineFactory,
     maxConcurrent: deps.maxConcurrent,
   });
-  registerTaskRoutes(app, { config, db, auth, bus, orchestrator });
-  const schedulerDeps = { config, db, bus, orchestrator, jwtSecret };
-  const scheduler = new VibeScheduler(schedulerDeps);
-  registerScheduleRoutes(app, { ...schedulerDeps, auth, scheduler });
-
   // ── 批次 4.5：workspace + profiles + assistant ──
   const workspace = new WorkspaceManager(config.homeDir);
   const knowledgeSync = new KnowledgeSyncManager({ homeDir: config.homeDir, db });
   const skillsSync = new SkillsSyncManager({ homeDir: config.homeDir, db });
   const assistant = new WorkspaceAssistantManager({ config, bus, engineFactory });
+
+  // ── 批次 4.2/4.3：stores + tasks CRUD + agent 编排；4.4：调度 ──
+  // （workspace 先建：store create 的档案脚手架走 createStoreProfile，
+  //   原 routers/stores.py:125 create_store_profile。）
+  registerTaskRoutes(app, { config, db, auth, bus, orchestrator, createStoreProfile: workspace.createStoreProfile.bind(workspace) });
+  const schedulerDeps = { config, db, bus, orchestrator, jwtSecret };
+  const scheduler = new VibeScheduler(schedulerDeps);
+  registerScheduleRoutes(app, { ...schedulerDeps, auth, scheduler });
+
   registerWorkspaceRoutes(app, { config, db, auth, bus, workspace, knowledgeSync, skillsSync, assistant });
   registerProfilesRoutes(app, { db, auth, manager: new ProfileManager(ProfileManager.defaultPath(config.homeDir)) });
 

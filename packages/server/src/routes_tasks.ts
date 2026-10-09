@@ -3,7 +3,7 @@
 // agent 执行类端点（start/design/execute-plan/agent/*、result、wake）留批次 4.3 —— 501。
 
 import { Hono, type Context } from "hono";
-import { mkdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { HttpError } from "./types";
@@ -16,6 +16,7 @@ import { TelemetryEvent } from "./telemetry/events";
 import { profileKindForId } from "./telemetry/tasks";
 import type { TaskOrchestrator } from "./agent/orchestrator";
 import type { ServerConfig } from "./config";
+import { readTextSync, writeTextSync } from "./workspace/textio";
 
 export interface TaskDeps {
   config: ServerConfig;
@@ -25,6 +26,14 @@ export interface TaskDeps {
     emit: (type: string, data: Record<string, unknown>) => void;
   };
   orchestrator: TaskOrchestrator;
+  /** 店铺档案脚手架（WorkspaceManager.createStoreProfile；app.ts 注入）。 */
+  createStoreProfile?: (
+    slug: string,
+    name: string,
+    platform?: string,
+    country?: string,
+    backend?: string,
+  ) => Promise<unknown>;
 }
 
 interface StoreRow {
@@ -82,12 +91,38 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+/** 原 stores.py:530 _replace_name_in_md_files：.md 文件里的旧店名引用替换（单文件失败不挡改名）。 */
+function replaceNameInMdFiles(directory: string, oldName: string, newName: string): void {
+  if (!existsSync(directory)) return;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (entry.endsWith(".md")) {
+        try {
+          const content = readTextSync(full);
+          if (content.includes(oldName)) writeTextSync(full, content.split(oldName).join(newName));
+        } catch {
+          /* 原 logger.warning 等价 */
+        }
+      }
+    }
+  };
+  walk(directory);
+}
+
 function storeSlug(name: string, id: string): string {
+  // 原 browser/wrapper.py store_slug：ASCII 归约非空时直接用归约名（无后缀），
+  // 仅归约为空才回退 store-<id 前 8 位>。批次 4.7.2 录制回放对齐——此前恒拼
+  // id 后缀，店铺工作区目录名与原实现漂移（replay-store-renamed vs
+  // replay-store-renamed-c82f5251）。
   const base = name
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/_/g, "-")
+    .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `${base || "store"}-${id.slice(0, 8)}`;
+  return base || `store-${id.slice(0, 8)}`;
 }
 
 function storeResponse(s: StoreRow): Record<string, unknown> {
@@ -167,7 +202,7 @@ function taskStepResponse(r: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
-  const { db, auth, bus, config, orchestrator } = deps;
+  const { db, auth, bus, config, orchestrator, createStoreProfile } = deps;
   const nowIso = () => new Date().toISOString();
   const storeDir = (name: string, id: string) => join(config.homeDir, "stores", storeSlug(name, id));
 
@@ -219,14 +254,21 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       now,
       now,
     );
-    // 店铺工作区目录 + metadata.json（best-effort，失败不挡创建）
+    // 店铺工作区目录 + metadata.json + 档案脚手架（原 stores.py:108-133，
+    // best-effort：失败只 warning 不挡创建）
     try {
+      const slug = storeSlug(body.name, id);
       const dir = storeDir(body.name, id);
       mkdirSync(dir, { recursive: true });
       const metaFile = join(dir, "metadata.json");
       if (!existsSync(metaFile)) {
-        writeFileSync(metaFile, JSON.stringify({ platforms: body.platform_countries ?? {} }, null, 2));
+        // 原经 Python 文本模式写（win32 CRLF，fixture size 63 = 57 LF + 6）
+        writeTextSync(metaFile, JSON.stringify({ platforms: body.platform_countries ?? {} }, null, 2));
       }
+      // STORE.md / notes.md / logistics.md / CATALOG.md 桩（create_store_profile）
+      const platforms = body.platforms ?? ["amazon"];
+      const countries = body.countries ?? ["US"];
+      await createStoreProfile?.(slug, body.name, platforms[0] ?? "", countries[0] ?? "", body.browser_backend ?? "chrome");
     } catch {
       /* best-effort */
     }
@@ -274,6 +316,8 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
           rmSync(newDir, { recursive: true, force: true });
           const { renameSync } = await import("node:fs");
           renameSync(oldDir, newDir);
+          // 原 stores.py:209 _replace_name_in_md_files：.md 里的旧店名引用替换
+          replaceNameInMdFiles(newDir, store.name, body.name);
         } catch {
           /* best-effort */
         }
@@ -459,7 +503,9 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
     });
     // defer_start / 执行编排（队列→agent）留 4.3：任务停在 pending
     void body.defer_start;
-    return c.json(payload);
+    // 原create_task 返回 ORM task 经 response_model 序列化——created_by_name 保持
+    // 模型缺省 None（带 creator 名的 payload 只用于 SSE 广播，routers/tasks.py:187-216）。
+    return c.json({ ...payload, created_by_name: null });
   });
 
   app.get("/api/tasks/:task_id", (c: Context) => {
@@ -632,21 +678,26 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
   app.post("/api/tasks/:task_id/messages", async (c: Context) => {
     const user = getCurrentUser(c, auth);
     const taskId = (c.req.param("task_id") ?? "");
+    // 原 send_task_message 校验顺序：content 必填（400）先于任务查找（404）与
+    // 状态机判定。批次 4.7.2 录制回放对齐（此前 TS 先查状态，空 content 在
+    // pending 任务上返回 400 'Cannot message task in status pending'）。
+    const rawBody = (await c.req.json().catch(() => ({}))) as { content?: string; profile_id?: string };
+    if (!rawBody.content?.trim()) throw new HttpError(400, "content is required");
     const task = requireTask(taskId);
     if (orchestrator.isRunning(taskId)) throw new HttpError(409, "Agent is running; wait for it to finish");
     const status = String(task.status);
     if (!["completed", "failed", "planned", "waiting"].includes(status)) {
       throw new HttpError(400, `Cannot message task in status ${status}`);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { content?: string; profile_id?: string };
-    if (!body.content?.trim()) throw new HttpError(422, "content required");
+    const body = rawBody;
     const planPhaseActive =
       Number(task.plan_mode) &&
       (Number(task.is_plan_only) || (task.started_at == null && ["pending", "queued", "designing", "failed"].includes(status)));
     const planning = status === "planned" || Boolean(planPhaseActive);
     const target = planning ? "designing" : "running";
     if (!canTransition(status, target)) throw new HttpError(400, `Cannot message task in status ${status}`);
-    orchestrator.insertUserMessage(taskId, body.content);
+    const content = rawBody.content!.trim();
+    orchestrator.insertUserMessage(taskId, content);
     const profileId = body.profile_id ?? (task.ai_profile_id as string | null) ?? (user.default_profile_id as string | null) ?? "default";
     db.prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?").run(target, new Date().toISOString(), taskId);
     db.prepare(
@@ -673,7 +724,9 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
     const body = (await c.req.json().catch(() => ({}))) as { request_id?: string; answers?: Record<string, unknown> };
     if (!body.request_id) throw new HttpError(422, "request_id required");
     const answered = orchestrator.answer(taskId, body.request_id, body.answers ?? {});
-    if (!answered) throw new HttpError(409, "No pending question");
+    // 原 tasks_conversation.py answer_question：409 detail 恒
+    // 'No agent running or no pending question'（批次 4.7.2 对齐）。
+    if (!answered) throw new HttpError(409, "No agent running or no pending question");
     return c.json({ ok: true, resumed: true });
   });
 

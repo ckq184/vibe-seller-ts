@@ -4,6 +4,8 @@
 //  - git 一律走 PATH 上的 git 子进程（原实现 GitPython 与子进程混用；语义一致：锁内串行）。
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+// 文本 IO 走 textio（win32 CRLF 对齐，见 textio.ts 注释）；二进制/git 走原 fs。
+import { normalizeNewlines, readTextSync, writeTextSync } from "./textio";
 import { execFile } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -67,17 +69,16 @@ export class WorkspaceManager {
     migrateStoreData(this.root);
 
     const claudeMd = join(this.root, "CLAUDE.md");
-    if (!existsSync(claudeMd)) writeFileSync(claudeMd, WORKSPACE_CLAUDE_MD, "utf8");
+    if (!existsSync(claudeMd)) writeTextSync(claudeMd, WORKSPACE_CLAUDE_MD);
 
     const gitDir = join(this.root, ".git");
     if (!existsSync(gitDir)) {
       await this.runGit("init");
       const gitignore = join(this.root, ".gitignore");
       if (!existsSync(gitignore)) {
-        writeFileSync(
+        writeTextSync(
           gitignore,
           "*.pyc\n__pycache__/\n.DS_Store\n.venv/\nnode_modules/\nconfig/\ntask_history/\ndata/\n*.db-journal\n*.db-wal\n*.db-shm\n",
-          "utf8",
         );
       }
       await this.runGit("add", "-A");
@@ -87,13 +88,13 @@ export class WorkspaceManager {
     // 瞬态/生成路径确保在 .gitignore 里
     const gitignore = join(this.root, ".gitignore");
     if (existsSync(gitignore)) {
-      const content = readFileSync(gitignore, "utf8");
+      const content = readTextSync(gitignore);
       const additions: string[] = [];
       for (const entry of ["task_history/", "data/", "*.db-journal", "tasks/", "node_modules/"]) {
         if (!content.includes(entry)) additions.push(entry);
       }
       if (additions.length > 0) {
-        writeFileSync(gitignore, `${content.replace(/\s+$/, "")}\n${additions.join("\n")}\n`, "utf8");
+        writeTextSync(gitignore, `${content.replace(/\s+$/, "")}\n${additions.join("\n")}\n`);
       }
     }
   }
@@ -119,7 +120,13 @@ export class WorkspaceManager {
       }
     };
     walk(this.root);
-    items.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    // 原 sorted(rglob('*')) 比较 PureWindowsPath——Windows 路径比较大小写不敏感
+    // （'bh-tmp' 排在 'CLAUDE.md' 前）。JS 字符串比较是 case-sensitive，显式折叠。
+    items.sort((a, b) => {
+      const la = a.path.toLowerCase();
+      const lb = b.path.toLowerCase();
+      return la < lb ? -1 : la > lb ? 1 : 0;
+    });
     return items;
   }
 
@@ -146,7 +153,7 @@ export class WorkspaceManager {
     const bytes = readFileSync(filePath);
     // 严格 utf-8（对应 Python UnicodeDecodeError）；平台导出（csv/tsv）可能是 GB18030
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      return normalizeNewlines(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } catch {
       try {
         return new TextDecoder("gb18030", { fatal: true }).decode(bytes);
@@ -182,7 +189,7 @@ export class WorkspaceManager {
         }
       });
     }
-    writeFileSync(filePath, sanitizeText(content), "utf8");
+    writeTextSync(filePath, sanitizeText(content));
     await this.autoCommit(`Update ${relPath}`);
   }
 
@@ -252,7 +259,7 @@ export class WorkspaceManager {
   async fileHistory(relPath: string, maxCount = 50): Promise<{ sha: string; message: string; date: string; author: string }[]> {
     this.safePath(relPath); // 路径校验
     const gitPath = relPath.replace(/\\/g, "/");
-    const out = await this.runGit("log", `--max-count=${maxCount}`, "--pretty=format:%H%x1f%s%x1f%aI%x1f%an <%ae>%x1e", "--", gitPath);
+    const out = await this.runGit("log", `--max-count=${maxCount}`, "--pretty=format:%H%x1f%s%x1f%aI%x1f%an%x1e", "--", gitPath);
     if (out.code !== 0) throw new HttpError(400, `git log failed: ${out.stderr}`);
     return decodeGitLog(out.stdout);
   }
@@ -307,7 +314,7 @@ export class WorkspaceManager {
           files.push({ path: rel, name: fname, size: statSync(f).size });
           if (fname === "SKILL.md") {
             try {
-              const fm = parseYamlFrontmatter(readFileSync(f, "utf8"));
+              const fm = parseYamlFrontmatter(readTextSync(f));
               description = fm.description ?? "";
             } catch {
               /* frontmatter 解析失败不致命 */
@@ -375,19 +382,19 @@ export class WorkspaceManager {
 
     const storeMd = join(storeDir, "STORE.md");
     if (!existsSync(storeMd)) {
-      writeFileSync(storeMd, `---\nbrowser: ${backend}\n---\n\n# Store: ${name}\n\n`, "utf8");
+      writeTextSync(storeMd, `---\nbrowser: ${backend}\n---\n\n# Store: ${name}\n\n`);
     }
     const notesMd = join(storeDir, "notes.md");
-    if (!existsSync(notesMd)) writeFileSync(notesMd, `# Notes for ${name}\n\n`, "utf8");
+    if (!existsSync(notesMd)) writeTextSync(notesMd, `# Notes for ${name}\n\n`);
     const logisticsMd = join(storeDir, "logistics.md");
-    if (!existsSync(logisticsMd)) writeFileSync(logisticsMd, `# Logistics for ${name}\n\n`, "utf8");
+    if (!existsSync(logisticsMd)) writeTextSync(logisticsMd, `# Logistics for ${name}\n\n`);
 
     writeCatalogStub(storeDir, slug, name);
 
     if (backend === "ziniao") {
       const routingMd = join(storeDir, "browser-routing.md");
       if (!existsSync(routingMd)) {
-        writeFileSync(
+        writeTextSync(
           routingMd,
           "# Browser Routing Rules\n\n" +
             "<!-- Custom routing rules for this store. " +
@@ -398,7 +405,6 @@ export class WorkspaceManager {
             "- logistics.example.com → Chrome aux\n" +
             "- sellercentral.amazon.* → Ziniao\n" +
             "-->\n",
-          "utf8",
         );
       }
     }
@@ -433,7 +439,7 @@ export class WorkspaceManager {
   private writeLockfile(data: { version: number; skills: Record<string, unknown> }): void {
     mkdirSync(dirname(this.lockfilePath), { recursive: true });
     const tmp = join(dirname(this.lockfilePath), `.tmp-${randomBytes(6).toString("hex")}`);
-    writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+    writeTextSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, this.lockfilePath);
   }
 
@@ -449,7 +455,7 @@ export class WorkspaceManager {
     // 原实现：无 content 时模板总是覆写（create 语义就是重建脚手架）
     const template =
       `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${description}\n\n## Instructions\n\n<!-- Add skill instructions here -->\n`;
-    writeFileSync(skillMd, template, "utf8");
+    writeTextSync(skillMd, template);
     const lockfile = this.readLockfile();
     const now = new Date().toISOString();
     lockfile.skills[slug] = { source: originUrl ? "url" : "local", name, origin_url: originUrl, created_at: now, updated_at: now };
@@ -522,7 +528,7 @@ export class WorkspaceManager {
     const skillDir = join(skillsDir, slug);
     const existed = existsSync(skillDir);
     mkdirSync(skillDir, { recursive: true });
-    writeFileSync(join(skillDir, "SKILL.md"), sanitizeText(skillMd), "utf8");
+    writeTextSync(join(skillDir, "SKILL.md"), sanitizeText(skillMd));
     for (const [rel, content] of Object.entries(files ?? {})) {
       const parts = rel.split(/[\\/]/).filter((p) => p.length > 0);
       if (isAbsolute(rel) || parts.length === 0 || parts.some((p) => p === "..") || parts[parts.length - 1] === "SKILL.md") {
@@ -530,7 +536,7 @@ export class WorkspaceManager {
       }
       const dest = join(skillDir, ...parts);
       mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, sanitizeText(content), "utf8");
+      writeTextSync(dest, sanitizeText(content));
     }
     const lockfile = this.readLockfile();
     const now = new Date().toISOString();

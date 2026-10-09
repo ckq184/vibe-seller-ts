@@ -375,9 +375,41 @@ export function seed(db: DatabaseSync, cfg: ServerConfig, hashPassword: (plain: 
       `INSERT INTO users (id, username, email, password_hash, role, is_active, avatar_url,
                           plan_mode_default, debug_mode, default_profile_id, sync_profile_to_schedules,
                           created_at, updated_at)
-       VALUES ('00000000-0000-0000-0000-000000000002', 'ai_bot', NULL, 'disabled', 'ai_bot',
-               0, NULL, 0, 0, 'default', 0, ?, ?)`,
+       VALUES ('00000000-0000-0000-0000-000000000002', 'ai_bot', 'ai@vibe-seller.local', 'disabled', 'ai_bot',
+               1, NULL, 0, 0, 'default', 0, ?, ?)`,
     ).run(now, now);
+  }
+
+  // 系统 catalog 调度（原 init_db database.py:190-216，按 id 判存 = fresh install 才种）：
+  // two_phase + staleness_check='catalog' + skip_reflection，创建人 = ai_bot；
+  // timezone 列原模型缺省 get_server_timezone()。
+  if (!db.prepare("SELECT id FROM schedules WHERE id = '_catalog_sync'").get()) {
+    db.prepare(
+      `INSERT INTO schedules (id, store_id, created_by, title, description, platform, country, plan,
+                              schedule_type, schedule_time, schedule_day, interval_value, timezone,
+                              is_active, is_system, phase_mode, staleness_check, skip_reflection,
+                              finalize_description, finalize_enabled_at, plan_mode, ai_profile_id,
+                              plan_status, plan_version, current_planning_task_id, plan_error,
+                              created_at, updated_at)
+       VALUES ('_catalog_sync', NULL, '00000000-0000-0000-0000-000000000002', 'Update Knowledge Catalogs', ?,
+               NULL, NULL, NULL, 'days', '03:00', NULL, 1, ?, 1, 1, 'two_phase', 'catalog', 1,
+               NULL, NULL, 0, 'default', 'none', 0, NULL, NULL, ?, ?)`,
+    ).run(
+      "Regenerate knowledge catalogs in two phases: L2 (global knowledge/) then L3 (per-store). " +
+        "Each level accumulates entries from the level below. Old catalogs have been removed — you MUST write new ones.",
+      serverTimezone(),
+      now,
+      now,
+    );
+  }
+}
+
+/** 服务器 IANA 时区（原 get_server_timezone；解析失败回 UTC）。 */
+function serverTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
   }
 }
 

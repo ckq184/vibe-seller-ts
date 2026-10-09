@@ -456,7 +456,7 @@ describe("telemetry app 面", () => {
   const putJson = (path: string, body: unknown) =>
     app.request(path, { method: "PUT", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify(body) });
 
-  it("locale 端点：白名单 en/zh；否则 unknown；恒 ok:true；>16 截断；app_locale 跟随", async () => {
+  it("locale 端点：白名单 en/zh；否则 unknown；恒 ok:true；>16 → 422 校验形状（批次 4.7.2 对齐原 pydantic max_length=16）；app_locale 跟随", async () => {
     let res = await postJson("/api/telemetry/locale", { locale: "zh" });
     expect(await res.json()).toEqual({ ok: true, locale: "zh" });
     expect(telemetry.baseProperties().app_locale).toBe("zh");
@@ -469,11 +469,22 @@ describe("telemetry app 面", () => {
     expect(await res.json()).toEqual({ ok: true, locale: "en" });
     expect(telemetry.baseProperties().app_locale).toBe("en");
 
-    // ≤16 截断（任务预裁决；原实现为 pydantic max_length=16 → 422，差异已注释记录）。
-    // 截断后的 16 字符不在白名单 → 归一 unknown。
+    // >16 字符 → 422，形状 = FastAPI RequestValidationError（routers/telemetry.py
+    // LocalePayload max_length=16）；不落白名单，app_locale 不变。
     res = await postJson("/api/telemetry/locale", { locale: "x".repeat(20) });
-    expect(await res.json()).toEqual({ ok: true, locale: "unknown" });
-    expect(telemetry.baseProperties().app_locale).toBe("unknown");
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({
+      detail: [
+        {
+          type: "string_too_long",
+          loc: ["body", "locale"],
+          msg: "String should have at most 16 characters",
+          input: "x".repeat(20),
+          ctx: { max_length: 16 },
+        },
+      ],
+    });
+    expect(telemetry.baseProperties().app_locale).toBe("en");
   });
 
   it("settings GET：env 禁用 → 回报 telemetry_enabled='false'（PRD §3.5.5）", async () => {

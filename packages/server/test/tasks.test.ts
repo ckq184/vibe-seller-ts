@@ -98,7 +98,9 @@ describe("tasks 契约", () => {
     expect(Object.keys(created).sort()).toEqual(
       ["ai_profile_id", "batch_id", "completed_at", "created_at", "created_by_name", "description", "error", "error_category", "id", "is_plan_only", "parent_task_id", "plan", "plan_history", "plan_mode", "platform", "country", "result", "review_gaps", "schedule_id", "session_id", "started_at", "status", "store_id", "submission_count", "submitted_result", "title", "todos", "updated_at", "wait_condition"].sort(),
     );
-    expect(created).toMatchObject({ status: "pending", plan_mode: true, ai_profile_id: "default", created_by_name: "admin", submission_count: 0, is_plan_only: false });
+    // created_by_name 在 create 响应恒 null（原 response_model 缺省；SSE payload 才带
+    // creator 名）——批次 4.7.2 录制回放对齐，GET/LIST 仍解析为 'admin'
+    expect(created).toMatchObject({ status: "pending", plan_mode: true, ai_profile_id: "default", created_by_name: null, submission_count: 0, is_plan_only: false });
     const emitted = deps.bus.history.at(-1)!;
     expect(emitted.type).toBe("task_created");
     expect(emitted.data).toMatchObject({ task_id: created.id, store_id: null });
