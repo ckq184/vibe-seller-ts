@@ -1,6 +1,7 @@
 // 事件翻译：AgentEvent → 桥 SSE 帧（vibe-seller 前端词汇表）。
 // 纯逻辑、有状态（门计数、usage 缓存、respond 文本缓存），逐字段对齐
-// docs/bridge-protocol.md 的映射表；Python 侧 TsAgentBackend 消费的就是这些帧。
+// docs/bridge-protocol.md 的映射表；原 Python 侧消费方 TsAgentBackend 已随
+// Phase 5.2 退役，现为 server 编排器/assistant 进程内消费同一词表。
 
 import type { AgentEvent } from "@vibe/core";
 

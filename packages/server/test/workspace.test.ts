@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createScriptedEngine } from "@vibe/bridge";
+import { createScriptedEngine } from "./scripted-engine";
 import { createApp, hashPassword, type AppDeps } from "../src/app";
 import { openDb, seed } from "../src/db";
 import { EventBus } from "../src/bus";

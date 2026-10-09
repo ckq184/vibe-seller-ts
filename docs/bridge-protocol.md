@@ -1,5 +1,11 @@
 # vibe-seller 桥接协议（Python FastAPI ↔ TS Agent Runtime）v1
 
+> **状态：已退役（Phase 5.2，2026-10）**。编排桥的 TS 服务端（HTTP+SSE 桥服务、
+> scripted 引擎、MCP stdio 客户端）与 Python 侧适配器（`python/ts_agent_backend.py`）
+> 均已删除：5.1 原生 ToolPort 让 TS server 进程内直接组装 22 工具面，跨语言桥不再
+> 存在。事件词汇表与闸门语义由 server 编排器/assistant 经 `@vibe/bridge` 的
+> translator 进程内继续消费（词汇契约不变）；本文保留作历史裁决记录。
+
 > 绞杀者接缝。原仓库 `app/ai/base.py::AIAgentBackend` 是作者预留的抽象（docstring：
 > "Future: OwnAgentRuntime"）。本协议让 `TsAgentBackend(AIAgentBackend)` 通过
 > HTTP+SSE 把 agent 执行切到 `@vibe/runtime`，FastAPI / task_runner / orchestrator

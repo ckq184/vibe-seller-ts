@@ -329,9 +329,40 @@ function ensureSchema(db: DatabaseSync): void {
       PRIMARY KEY (id)
     );
   `);
-  // 老库补列（批次 4.4：schedules 的 plan_mode / ai_profile_id）
+  // 老库补列（原地升级兜底）：原 app/database.py:36-84 `_ensure_added_columns` 全量移植。
+  // create_all 只建缺表、绝不 ALTER 已有表，列是分期上线的——老 Python 版本的库直跳
+  // TS 时靠这里逐条补齐。PRAGMA 守卫幂等，每次启动可重跑；ALTER 文本逐条对齐原实现
+  // （注意与上方 create_all 的差异：SQLite 对存量行加 NOT NULL 列必须显式带 DEFAULT，
+  // 原实现正是这样写的）。
+  // 以下前 2 条为批次 4.4 既有；其余 14 条 = 原 Python 列表全量（无删减）。
   ensureColumn(db, "schedules", "plan_mode", "BOOLEAN");
   ensureColumn(db, "schedules", "ai_profile_id", "VARCHAR(50)");
+  ensureColumn(db, "schedules", "finalize_description", "TEXT");
+  // Backfilled below — see _backfill_finalize_enabled_at 等价注释（原 :48-49）
+  ensureColumn(db, "schedules", "finalize_enabled_at", "TEXT");
+  ensureColumn(db, "tasks", "is_finalize", "BOOLEAN NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "plan_mode", "BOOLEAN NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "is_plan_only", "BOOLEAN NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "skip_reflection", "BOOLEAN NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "plan_version", "INTEGER");
+  // Outcome 模型：submission 独立留存，流式 prose 不再与交付物共列（原 :60-66 注释）
+  ensureColumn(db, "tasks", "accepted_result", "TEXT");
+  ensureColumn(db, "tasks", "submitted_result", "TEXT");
+  ensureColumn(db, "tasks", "review_gaps", "TEXT");
+  ensureColumn(db, "tasks", "submission_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "transcript_tail", "TEXT");
+  // 用户偏好：default profile 变更时回钉自有调度（原 :67-68）
+  ensureColumn(db, "users", "sync_profile_to_schedules", "BOOLEAN NOT NULL DEFAULT 0");
+  // 店铺实际产能（FBA / ads / FBN），区别于销售地（原 :69-71）
+  ensureColumn(db, "stores", "capabilities", "TEXT NOT NULL DEFAULT '{}'");
+  // 原 _backfill_finalize_enabled_at（database.py:87-109）：升级时刻武装存量 finalize
+  // 调度——已有 finalize 提示而无时间戳的老行，诚实读法是"从本次升级起"生效（更早的
+  // 批次早已在无 finalize 的情况下完成，无人欠它们补终局）。自限：只碰
+  // finalize_description 非空且时间戳为 NULL 的行，首启后即稳定为 no-op。
+  db.prepare(
+    "UPDATE schedules SET finalize_enabled_at = ? " +
+      "WHERE finalize_enabled_at IS NULL AND finalize_description IS NOT NULL AND TRIM(finalize_description) != ''",
+  ).run(new Date().toISOString());
 }
 
 export interface DbBundle {

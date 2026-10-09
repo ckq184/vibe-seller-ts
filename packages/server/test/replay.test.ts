@@ -1,8 +1,8 @@
 // 批次 4.7.2：录制流量回放契约测试。
 //
-// fixture（packages/server/test/fixtures/replay/traffic.jsonl）由
-// python/record_replay_fixture.py 用参考仓库 venv 进程内录制原 FastAPI app
-// 生成并提交进仓库；本测试在全新 tmp VIBE_HOME + 空 DB 上以 app.request 模式
+// fixture（packages/server/test/fixtures/replay/traffic.jsonl）由录制器
+// python/record_replay_fixture.py（已随 Phase 5.2 退役，历史路径）用参考仓库
+// venv 进程内录制原 FastAPI app 生成并提交进仓库；本测试在全新 tmp VIBE_HOME + 空 DB 上以 app.request 模式
 // 启动 TS app，按序重放同一序列，逐步断言：
 //   1) status 逐字节一致；
 //   2) 响应 JSON 经 replay/normalize.ts 归一化后 deep-equal（两侧同规则）。
@@ -27,7 +27,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Decision } from "@vibe/core";
-import { createScriptedEngine, gatePolicyFor } from "@vibe/bridge";
+import { gatePolicyFor } from "@vibe/bridge";
+import { createScriptedEngine } from "./scripted-engine";
 import { createApp, hashPassword, type AppDeps } from "../src/app";
 import { openDb, seed } from "../src/db";
 import { EventBus } from "../src/bus";

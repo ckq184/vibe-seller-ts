@@ -1,37 +1,19 @@
-// 脚本引擎引导：VIBE_BRIDGE_ENGINE=scripted 时的确定性引擎（对齐原仓库
-// Options.MOCK_CLI 的假后端模式——测试/CI 用，绝不假装是真模型）。
+// server 测试专用确定性引擎（原 @vibe/bridge scripted.ts）。
+// Phase 5.2 桥的 scripted 引擎随 Python 编排路径退役：生产路径（VIBE_BRIDGE_ENGINE=
+// scripted）已不存在；仅测试仍需要一个零网络的确定性引擎驱动编排器/调度器全链路，
+// 故落为测试助手（实现逐字未改；闸门策略 gatePolicyFor 仍在 @vibe/bridge 生产面）。
 
-import { driveLoop, modelDrivenCore, scriptedModel, type Decision, type GatePolicy, type ToolIntent, type ToolPort } from "@vibe/core";
+import { gatePolicyFor } from "@vibe/bridge";
+import { driveLoop, modelDrivenCore, scriptedModel, type Decision, type ToolPort } from "@vibe/core";
 import type { EngineDeps, RunEngine } from "@vibe/runtime";
+
+export { gatePolicyFor };
 
 export interface ScriptedConfig {
   decisions: Decision[];
   gatedTools: string[];
-  /** 工具桩：任何调用回显参数并成功（脚本引擎只验证桥协议，不验证工具语义）。 */
+  /** 工具桩：任何调用回显参数并成功（脚本引擎只验证协议与编排，不验证工具语义）。 */
   toolNames: string[];
-}
-
-export function parseScriptedConfig(raw: string): ScriptedConfig {
-  const parsed = JSON.parse(raw) as {
-    decisions?: Decision[];
-    gated_tools?: string[];
-    tool_names?: string[];
-  };
-  return {
-    decisions: parsed.decisions ?? [],
-    gatedTools: parsed.gated_tools ?? [],
-    toolNames: parsed.tool_names ?? [],
-  };
-}
-
-export function gatePolicyFor(toolNames: readonly string[]): GatePolicy | undefined {
-  if (toolNames.length === 0) return undefined;
-  const gated = new Set(toolNames);
-  return {
-    requiresApproval: (intent: ToolIntent) => gated.has(intent.name),
-    question: (intent: ToolIntent) =>
-      `工具 ${intent.name} 需要人工确认后才能执行。参数：${JSON.stringify(intent.arguments)}`,
-  };
 }
 
 export function createScriptedEngine(config: ScriptedConfig, toolPort?: ToolPort): RunEngine {

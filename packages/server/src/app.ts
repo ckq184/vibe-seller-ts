@@ -51,6 +51,8 @@ export interface AppDeps {
   maxConcurrent?: number;
   /** 生产 boot 打开（调度器 7 系统作业 + schedule 重建 + 队列恢复）；测试缺省关，保确定性。 */
   runScheduler?: boolean;
+  /** 生产 boot 捕获调度器实例（优雅停机停调度用，main.ts）；测试缺省不传。 */
+  schedulerSink?: (scheduler: VibeScheduler) => void;
   /** 生产 boot 打开（knowledge/skills 冷却门控的远端同步检查）；测试缺省关，避免网络。 */
   bootSync?: boolean;
   /** 测试注入浏览器启动器（缺省真 BrowserStarter——会 spawn Chrome，测试必须注入）。 */
@@ -567,6 +569,7 @@ export function createApp(deps: AppDeps): Hono {
   registerTaskRoutes(app, { config, db, auth, bus, orchestrator, createStoreProfile: workspace.createStoreProfile.bind(workspace) });
   const schedulerDeps = { config, db, bus, orchestrator, jwtSecret };
   const scheduler = new VibeScheduler(schedulerDeps);
+  deps.schedulerSink?.(scheduler);
   registerScheduleRoutes(app, { ...schedulerDeps, auth, scheduler });
 
   registerWorkspaceRoutes(app, { config, db, auth, bus, workspace, knowledgeSync, skillsSync, assistant });
