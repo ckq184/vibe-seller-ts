@@ -1,6 +1,7 @@
-// 批次 4.7.3 前端零改动 e2e（PRD §5）。
+// 批次 4.7.3 前端零改动 e2e（PRD §5）；5.3 起驱动 vendor 进本仓的 frontend/
+// 构建产物（FRONTEND_DIST 默认 = <repoRoot>/frontend/dist，e2e/server.ts）。
 // 真 Chrome（channel:'chrome'，失败退化 Playwright chromium，均不可用则显式
-// skip）驱动参考仓库构建的原 React 19 前端（dist 只读挂载）打 TS server 真端口。
+// skip）驱动原 React 19 前端打 TS server 真端口。
 //
 // 五步断言全部以用户可见结果为准（元素出现 / 接口 200），选择器走语义角色 /
 // text / placeholder（en locale），不对前端内部实现做脆弱断言（前端唯一允许的
@@ -12,7 +13,9 @@
 //   - 零真网：浏览器侧拦截一切非 127.0.0.1 请求（前端内置 posthog →
 //     t.vibe-sellers.com 一律 abort）；服务端遥测被 NODE_ENV=test 门控
 //    （playwright.config.ts）不建客户端。
-//   - 前端零改动：参考仓库 frontend 目录只读，server 只做 readFile。
+//   - 前端零改动：5.3 起语义 = vendor 树与参考仓库哈希清单逐一 diff 为空
+//    （packages/server/test/frontend-vendor.test.ts 机器门禁）；构建产物
+//    frontend/dist 允许重建。server 对该目录只读。
 //
 // 注意：不使用 Playwright 内置 browser/context/page fixture——它们会拉起
 // Playwright 自带 chromium（本仓库不下载浏览器，必失败）；context/page 一律
@@ -26,7 +29,7 @@ import { expect, test, chromium, type Browser, type BrowserContext, type Page } 
 import { FRONTEND_DIST, startE2eServer, type E2eServer } from "./server";
 import * as telemetry from "../src/telemetry/core";
 
-// en locale 文案锚点（frontend/src/i18n/locales/en/translation.json）。
+// en locale 文案锚点（frontend/src/i18n/locales/en/translation.json，vendor 源）。
 const en = {
   identifierPlaceholder: "Username or email",
   passwordPlaceholder: "Enter your password",
@@ -38,7 +41,7 @@ const en = {
   telemetryTitle: "Anonymous usage telemetry",
 };
 
-test.describe("前端零改动 e2e（原 React dist × TS server 真端口）", () => {
+test.describe("前端零改动 e2e（vendor 前端构建产物 × TS server 真端口）", () => {
   let server: E2eServer | null = null;
   let browser: Browser | null = null;
   let context: BrowserContext | null = null;

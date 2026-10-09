@@ -11,7 +11,12 @@
     "start": "node scripts/dev-start.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
-    "e2e": "node -e \"const {existsSync}=require('node:fs');const d=process.env.FRONTEND_DIST||'D:/CKQ/workplace/_reference/vibe-seller-src/frontend/dist';if(!existsSync(d+'/index.html')){console.error('[e2e] skip: frontend dist not found:',d);process.exit(0)}\" && playwright test"
+    "vendor": "node scripts/vendor-frontend.mjs",
+    "vendor:check": "node scripts/vendor-frontend.mjs --check",
+    "build:server": "node scripts/build-server.mjs",
+    "package": "node scripts/package-release.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "e2e": "node -e \"const {existsSync}=require('node:fs');const {join}=require('node:path');const d=process.env.FRONTEND_DIST||join(process.cwd(),'frontend','dist');if(!existsSync(d+'/index.html')){console.error('[e2e] skip: frontend dist not found:',d);process.exit(0)}\" && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",

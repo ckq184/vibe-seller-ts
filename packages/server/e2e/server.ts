@@ -9,12 +9,16 @@
 //   沿用 createApp 的测试缺省（同契约测试）。其余序列（密钥 → DB → 种子 →
 //   持久化遥测开关 → telemetry.init → serve）与 boot() 一致。
 //
-// 零改动红线：FRONTEND_DIST 指向参考仓库构建产物，server 对该目录只读
-// （app.ts notFound 兜底 readFile），本套件全程不写参考仓库。
+// 零改动红线（5.3 起语义）：前端源已 vendor 进本仓 frontend/，"零改动" =
+// vendor 树与哈希清单逐一一致（清单 = 参考仓库字节级快照，见
+// packages/server/test/frontend-vendor.test.ts 与 scripts/vendor-frontend.mjs
+// --check）；构建产物（frontend/dist）允许随时重建，不在红线内。server 对
+// 该目录只读（app.ts notFound 兜底 readFile）。
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { DatabaseSync } from "node:sqlite";
 import { serve } from "@hono/node-server";
@@ -22,12 +26,14 @@ import { createApp, hashPassword, openDb, readServerConfig, resolveJwtSecret, se
 import { applyPersistedTelemetryFlag } from "../src/main";
 import * as telemetry from "../src/telemetry/core";
 
-// PRD §2/§5.1 钉死的参考仓库前端构建产物（只读挂载）；可用 FRONTEND_DIST 覆盖。
+// 前端资产：vendor 进本仓的 frontend/ 构建产物（scripts/vendor-frontend.mjs +
+// corepack pnpm build，见 package.json）；默认路径即 <repoRoot>/frontend/dist——
+// 批次 5.3 收口批次 4.7 台账第 8 项"硬编码参考仓库路径"。可用 FRONTEND_DIST 覆盖。
 // 刻意用正斜杠形式（跨平台脚本常见写法）：批次 4.7 曾因 app.ts SPA 前缀守卫
 // 未归一两侧路径分隔符导致资产全部落 index.html 白屏——修复后此处即为该
 // 缺陷的真实浏览器回归钉（spa.test.ts 是同缺陷的契约级钉子）。
-export const FRONTEND_DIST =
-  process.env.FRONTEND_DIST ?? "D:/CKQ/workplace/_reference/vibe-seller-src/frontend/dist";
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+export const FRONTEND_DIST = process.env.FRONTEND_DIST ?? join(REPO_ROOT, "frontend", "dist");
 
 export interface E2eServer {
   baseUrl: string;
