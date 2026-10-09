@@ -46,7 +46,7 @@ export interface AppDeps {
   jwtSecret: string;
   db: DatabaseSync;
   bus: EventBus;
-  /** 缺省用 defaultEngineFactory(process.env, config)（VIBE_BRIDGE_* 配置）；测试注入 scripted。 */
+  /** 缺省用 defaultEngineFactory(process.env, config, {db, app})（VIBE_BRIDGE_* 配置 + 原生工具面）；测试注入 scripted。 */
   engineFactory?: EngineFactory;
   maxConcurrent?: number;
   /** 生产 boot 打开（调度器 7 系统作业 + schedule 重建 + 队列恢复）；测试缺省关，保确定性。 */
@@ -547,7 +547,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ── 批次 4.2/4.3：stores + tasks CRUD + agent 编排；4.4：调度；4.5：workspace/profiles/assistant ──
-  const engineFactory = deps.engineFactory ?? defaultEngineFactory(process.env, config);
+  const engineFactory = deps.engineFactory ?? defaultEngineFactory(process.env, config, { db, app, jwtSecret });
   const orchestrator = new TaskOrchestrator({
     config,
     db,

@@ -1,7 +1,9 @@
-// server 的默认引擎工厂：进程内复用 @vibe/bridge 的 pi 引擎构建 + MCP 工具面。
+// server 的默认引擎工厂：pi 引擎构建 + 原生 ToolPort。
+// Phase 5.1：VIBE_BRIDGE_MCP_COMMAND 分支已删除——22 个工具改由进程内 app.request
+// 自调（native-tools.ts，逐语义移植原 app/mcp_server.py），env 设了也不再拉起任何
+// Python 子进程（engine-factory.test.ts 钉死）。
 // env 复用 VIBE_BRIDGE_* 命名（同一套配置同时驱动桥进程与 TS server）：
 //   VIBE_BRIDGE_API_KEY / BASE_URL / MODEL / PROVIDER_ID / SKILLS_DIR / GATED_TOOLS
-//   VIBE_BRIDGE_MCP_COMMAND（每任务拉起 app.mcp_server，--task-id 由编排器追加）
 // 多供应商 profile 两个来源（按 profileId 解析）：
 //   1. 桥 profiles.json（api_key_env 引用格式，密钥只走环境变量）；
 //   2. UI 管理的 ~/.vibe-seller/profiles.json（原仓库格式，env 内含密钥）——
@@ -11,25 +13,36 @@
 
 import {
   buildPi,
-  createMcpToolPort,
   gatePolicyFor,
   loadProfiles,
-  McpServerConnection,
   readEnv,
   toVibeToolSpecs,
   type PiBundle,
   type VibeProfile,
 } from "@vibe/bridge";
-import { fakeTools, type GatePolicy } from "@vibe/core";
+import type { GatePolicy } from "@vibe/core";
 import { readFileSync, statSync } from "node:fs";
+import type { Hono } from "hono";
+import type { DatabaseSync } from "node:sqlite";
 import { ProfileManager } from "../profiles/manager";
+import { VisionConfig, catalogPublic, DEFAULT_MODEL, isFake, modelIds } from "../vision/vision";
+import {
+  buildNativeToolSchemas,
+  createNativeToolPort,
+  filterVisibleTools,
+  imageModelGuide,
+  mintServiceToken,
+} from "./native-tools";
 import type { EngineFactory } from "./orchestrator";
 import type { ServerConfig } from "../config";
 
-export function defaultEngineFactory(env: NodeJS.ProcessEnv, config: ServerConfig): EngineFactory {
+export function defaultEngineFactory(
+  env: NodeJS.ProcessEnv,
+  config: ServerConfig,
+  loopback: { db: DatabaseSync; app: Hono; jwtSecret: string },
+): EngineFactory {
   const bridgeEnv = readEnv(env);
   const gates: GatePolicy | undefined = gatePolicyFor(bridgeEnv.gatedTools);
-  const mcpCommand = bridgeEnv.mcpCommand;
   const uiProfiles = new ProfileManager(ProfileManager.defaultPath(config.homeDir));
   const piBundles = new Map<string, Promise<PiBundle>>();
 
@@ -93,23 +106,26 @@ export function defaultEngineFactory(env: NodeJS.ProcessEnv, config: ServerConfi
     }
     const pi = await getPi(profileId, profile);
 
-    let dispose: (() => Promise<void>) | undefined;
-    let tools = fakeTools({});
-    let toolSpecs: ReturnType<typeof toVibeToolSpecs> = [];
-    if (mcpCommand) {
-      const conn = new McpServerConnection({ command: [...mcpCommand, "--task-id", taskId], cwd: bridgeEnv.mcpCwd });
-      try {
-        await conn.initialize();
-        const toolsInfo = await conn.listTools();
-        tools = createMcpToolPort(conn);
-        toolSpecs = toVibeToolSpecs(toolsInfo);
-        dispose = () => conn.dispose();
-      } catch (err: unknown) {
-        await conn.dispose();
-        throw err;
-      }
-    }
-    return { engine: pi.makeEngine(tools, toolSpecs), tools, gates, dispose };
+    // 原生工具面每 run 组装：能力门此刻判定，等价原 MCP 每 run _visible_tools()
+    // （mcp_server.py:40-47：无 KIE key 且非 fake → 隐藏 vibe_seller_generate_image）。
+    // 隐藏 ≠ 不可调用：dispatch 与可见性无关（原 tools/call 同样不查可见性）。
+    const visionCapability = Boolean(new VisionConfig(config.homeDir).getKieApiKey()) || isFake();
+    const schemas = filterVisibleTools(
+      buildNativeToolSchemas({ imageModelIds: modelIds(), imageModelGuide: imageModelGuide(catalogPublic(), DEFAULT_MODEL) }),
+      visionCapability,
+    );
+    const tools = createNativeToolPort({
+      app: loopback.app,
+      taskId,
+      // 服务令牌每 run 签发（原 claude_backend.py:498-545 注册 MCP 时签发同构：
+      // sub/role 取 ai_bot 用户、缺省 ('system','admin')、7 天 TTL；原实现以 cookie
+      // 附带——见 native-tools.ts 头注的实读裁决）。secret 用 app 解析后的同一把，
+      // 令牌必须能被本进程 auth 校验。
+      authToken: mintServiceToken(loopback.db, loopback.jwtSecret),
+    });
+    const toolSpecs = toVibeToolSpecs(schemas);
+    // 无进程可清 → dispose 恒空（返回件形状 tools/toolSpecs/dispose 不变）
+    return { engine: pi.makeEngine(tools, toolSpecs), tools, gates, dispose: undefined };
   };
 }
 
