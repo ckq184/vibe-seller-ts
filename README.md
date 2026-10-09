@@ -57,16 +57,19 @@ docs/
 
 ```bash
 npm install          # workspaces：core + runtime + adapters-pi + bridge + server
-npm start            # 本机开发启动 TS server（scripts/dev-start.mjs：esbuild 临时 bundle；
-                     # 分发形态是 Phase 5.3 的 bundle + Node 运行时捆绑安装器）
+npm start            # 本机开发启动 TS server（scripts/dev-start.mjs：esbuild 临时 bundle）
 npm test             # vitest run
 npm run typecheck    # tsc 严格模式全仓检查
-npm run e2e          # 前端零改动 e2e（需系统 Chrome；原 React dist 只读挂载）
+npm run e2e          # 前端零改动 e2e（需系统 Chrome；本仓 vendor 的前端 dist）
+npm run package      # 分发打包：vendor 校验 → 前端构建 → server bundle → release/ 组装
+npm run smoke:package  # 打包冒烟：全新安装 + Python→TS 原地升级两场景（升级场景需参考仓库 venv）
+npm run vendor:check # 前端 vendor 清单校验（frontend/ 必须与参考仓库字节级一致）
 ```
 
 > Python 编排路径（`python/ts_agent_backend.py` 跨语言契约测试、`npm run bridge:build`、
-> `python/record_replay_fixture.py` fixture 录制器）已随 Phase 5.2 退役；录制回放 fixture
-> 已入库，回放测试零 Python 依赖。
+> fixture 录制器）已随 Phase 5.2 退役；录制回放 fixture 已入库，回放测试零 Python 依赖。
+> 产品分发形态见 `docs/deploy.md`（捆绑 Node 运行时 + server.mjs + 前端 dist，支持从
+> Python 版原地升级）。
 
 ## 金标回放
 
@@ -76,4 +79,4 @@ fake 与 real 通道必须回放出**同一条** transcript，SDK 升级才不�
 
 ## 状态
 
-Phase 1–3 完成（内核/技能闸门/编排绞杀桥：TsAgentBackend + MCP 工具面 + plan 模式 + 多供应商 profiles）。**Phase 4 批次 4.1–4.7 全部完成**（批次 4.1–4.6 摘要见 git 历史与 `docs/migration-plan.md`；`@vibe/server` = Hono + node:sqlite 与原库原地共存，179 端点全点亮，JWT/bcrypt/Fernet 与 Python 逐字节兼容，SSE 总线契约一致，调度/workspace/profiles/email/channels/events/vision/ziniao 全家面齐）。**批次 4.7（验收）**：telemetry 模块移植（PostHog 最小 fetch 传输 + 四重门控 + ~20 事件面接线，零新运行时依赖）；**录制流量回放契约测试**——真 FastAPI（参考仓库 venv 进程内）录制 157 步 fixture 入库，TS 回放逐请求比对（零 Python 依赖、归一化 10 规则、时区钉死、篡改变红验证），对证修正 19 处 TS 契约偏差；**前端零改动 e2e**——`npm run e2e` 用 Playwright + 系统 Chrome 驱动原 React 19 构建产物（sha256 零改动）跑 TS server 关键流 5 用例。双重审查（独立规格审查 + 代码质量审查）后整改收口。测试：TS 322 通过 + 2 真实冒烟按需跳过；e2e 5 通过。**Phase 5 进行中**：批次 5.1 完成（原生 ToolPort——22 工具进程内 app.request 自调替换 Python MCP 子进程）；批次 5.2 完成（退役清理——`python/` 适配器与跨语言测试、桥 HTTP+SSE 服务/scripted 引擎/MCP 客户端删除，translator/profiles/引擎装配并入 server 进程内；原地升级 16 列补齐 + finalize 存量武装；`npm start` 开发启动 + SIGINT/SIGTERM 优雅关闭）；批次 5.3（分发打包：vendor 前端 + 单文件 bundle + Node 运行时捆绑安装器 + 原地升级验收）待做。切流验收用户已裁决跳过。
+Phase 1–3 完成（内核/技能闸门/编排绞杀桥：TsAgentBackend + MCP 工具面 + plan 模式 + 多供应商 profiles）。**Phase 4 批次 4.1–4.7 全部完成**（批次 4.1–4.6 摘要见 git 历史与 `docs/migration-plan.md`；`@vibe/server` = Hono + node:sqlite 与原库原地共存，179 端点全点亮，JWT/bcrypt/Fernet 与 Python 逐字节兼容，SSE 总线契约一致，调度/workspace/profiles/email/channels/events/vision/ziniao 全家面齐）。**批次 4.7（验收）**：telemetry 模块移植（PostHog 最小 fetch 传输 + 四重门控 + ~20 事件面接线，零新运行时依赖）；**录制流量回放契约测试**——真 FastAPI（参考仓库 venv 进程内）录制 157 步 fixture 入库，TS 回放逐请求比对（零 Python 依赖、归一化 10 规则、时区钉死、篡改变红验证），对证修正 19 处 TS 契约偏差；**前端零改动 e2e**——`npm run e2e` 用 Playwright + 系统 Chrome 驱动原 React 19 构建产物（sha256 零改动）跑 TS server 关键流 5 用例。双重审查（独立规格审查 + 代码质量审查）后整改收口。测试：TS 322 通过 + 2 真实冒烟按需跳过；e2e 5 通过。**Phase 5 完成（Python 退役）**：批次 5.1——原生 ToolPort（22 工具进程内 app.request 自调替换每 run 拉起的 Python MCP 子进程；服务令牌/能力门/send_email 两段式/sanitize_json/错误包装逐语义对齐原实现）；批次 5.2——退役清理（`python/` 适配器与跨语言测试、桥 HTTP+SSE 服务/scripted 引擎/MCP 客户端/`bridge:build` 删除，translator/profiles/引擎装配并入 server 进程内）+ 原地升级补列（`_ensure_added_columns` 14 条全量 + 既有 2 条 = 16 列 + `_backfill_finalize_enabled_at` finalize 存量武装）+ `npm start` + 优雅关闭；批次 5.3——vendor 前端 181 文件字节级进仓（三道哈希门禁）、esbuild 单文件 bundle、`npm run package` 组装 release（捆绑 node.exe + start/stop.bat）、**Python→TS 原地升级冒烟 23 断言全绿**（老 bcrypt 用户直接登录、数据/install_id 原样）、`docs/deploy.md`。审查整改：服务默认绑定 127.0.0.1（BACKEND_HOST 可覆盖）、stop.bat 防 pid 复用误杀、SSE 存续停机不挂死。测试：TS 357 通过 + 2 真实冒烟按需跳过；e2e 5/5；打包冒烟 23/23。**迁移至此全部完成**：产品运行时 = 捆绑 Node + server.mjs + 前端 dist，`~/.vibe-seller` 数据目录原地升级双向兼容；切流验收用户已裁决跳过。
