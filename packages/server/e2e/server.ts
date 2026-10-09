@@ -23,13 +23,11 @@ import { applyPersistedTelemetryFlag } from "../src/main";
 import * as telemetry from "../src/telemetry/core";
 
 // PRD §2/§5.1 钉死的参考仓库前端构建产物（只读挂载）；可用 FRONTEND_DIST 覆盖。
-// 注意必须用 Windows 原生反斜杠形式：app.ts 的 SPA 前缀守卫是
-// `candidate.startsWith(config.frontendDist)`，join() 产出反斜杠路径，正斜杠
-// 形式的 dist 路径会让前缀比对失败 → 所有资产请求落到 index.html（text/html），
-// 模块脚本被浏览器拒载。该怪癖是 server 侧潜在缺陷（本任务不动 app.ts，
-// 已在交付报告记 TODO）。
+// 刻意用正斜杠形式（跨平台脚本常见写法）：批次 4.7 曾因 app.ts SPA 前缀守卫
+// 未归一两侧路径分隔符导致资产全部落 index.html 白屏——修复后此处即为该
+// 缺陷的真实浏览器回归钉（spa.test.ts 是同缺陷的契约级钉子）。
 export const FRONTEND_DIST =
-  process.env.FRONTEND_DIST ?? "D:\\CKQ\\workplace\\_reference\\vibe-seller-src\\frontend\\dist";
+  process.env.FRONTEND_DIST ?? "D:/CKQ/workplace/_reference/vibe-seller-src/frontend/dist";
 
 export interface E2eServer {
   baseUrl: string;

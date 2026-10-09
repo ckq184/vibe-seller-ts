@@ -6,7 +6,7 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import bcrypt from "bcryptjs";
 import type { DatabaseSync } from "node:sqlite";
 import type { ServerConfig } from "./config";
@@ -571,8 +571,13 @@ export function createApp(deps: AppDeps): Hono {
     if (path.startsWith("/api/")) return c.json({ detail: "Not Found" }, 404);
     if (!config.frontendDist) return c.json({ detail: "Not Found" }, 404);
     const rel = normalize(path).replace(/^([/\\])+/, "");
-    const candidate = join(config.frontendDist, rel);
-    if (candidate.startsWith(config.frontendDist) && existsSync(candidate)) {
+    // 前缀守卫两侧都经 resolve 归一：FRONTEND_DIST 以正斜杠传入（跨平台脚本
+    // 常见写法）时 join() 产出反斜杠路径，直接 startsWith 会全部失配 → 资产
+    // 请求落到 index.html（text/html），模块脚本被浏览器拒载、页面白屏。
+    // （批次 4.7 前端 e2e 发现；spa.test.ts 为回归钉子。）
+    const distRoot = resolve(config.frontendDist);
+    const candidate = resolve(distRoot, rel);
+    if ((candidate === distRoot || candidate.startsWith(distRoot + sep)) && existsSync(candidate)) {
       try {
         const body = await readFile(candidate);
         return c.body(new Uint8Array(body), 200, { "content-type": MIME[extname(candidate)] ?? "application/octet-stream" });
