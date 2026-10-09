@@ -48,9 +48,13 @@ stop.bat    :: 停止
 ```
 
 - 启动后访问 `http://127.0.0.1:7777/`（端口见下表）。
+- 服务缺省只绑定 `127.0.0.1`（loopback）：分发包的承诺边界。需要局域网/反代访问时设
+  `BACKEND_HOST`（见 §5）——**改绑 `0.0.0.0` 属用户显式决定**，暴露面（防火墙/反代/认证）
+  由操作者自行承担。
 - pid 文件：`%VIBE_HOME%\vibe-seller.pid`；日志：`%VIBE_HOME%\logs\server-err.log` / `server-out.log`（每次启动覆盖）。
 - `start.bat` 幂等保护：pid 文件已存在则拒绝重复启动（先 `stop.bat`）。
 - `stop.bat` 先温和 taskkill，2 秒不退则强制终止（Windows 无跨进程 SIGTERM 等价物；SQLite 事务原子性保证强杀数据安全，与原 stop.sh 的 SIGKILL 兜底同级）；无 pid 文件时为 no-op。
+  杀前用 `tasklist` 校验该 pid 的映像名仍是 `node.exe`（不区分大小写）：pid 已被系统复用/进程已换时**只清 pid 文件、绝不杀进程**——防止按过期 pid 误杀无辜进程。
 
 开发形态（非分发）：`npm start`（仓库内 esbuild 临时 bundle 后进程内 import，仅本机开发）。
 
@@ -64,7 +68,7 @@ stop.bat    :: 停止
 
 首次 TS 启动自动完成（无需手工迁移）：
 
-- 老库补列：原 `_ensure_added_columns` 15 条全量移植（`packages/server/src/db.ts`），PRAGMA 守卫幂等；
+- 老库补列：原 `_ensure_added_columns` 14 条全量移植 + 既有 2 条 = 16 列（`packages/server/src/db.ts`），PRAGMA 守卫幂等；
 - 沿用 `data/jwt_secret`、`data/install_id`、`profiles.json`、`channels.json`、`email_dbs`、workspace git 仓库；
 - 用户密码：老 Python bcrypt 哈希直接验证（TS 登录链路 `bcryptjs` 兼容 `$2b$` 哈希）；
 - admin 种子凭据沿用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_EMAIL` 环境变量语义（与原实现一致）。
@@ -75,14 +79,15 @@ stop.bat    :: 停止
 
 数据目录不动，换回原 Python 启动命令（原仓库 `start.sh` / `uv tool` 安装的 `vibe-seller` 入口）即可。
 
-数据双向兼容范围 = Phase 4 迁移已逐项钉死的格式清单：SQLite schema（含 15 条补列，TS 侧只补列不破坏）、bcrypt 密码哈希、Fernet 加密字段、jwt_secret 文件、install_id、profiles.json、channels.json、email_dbs、workspace git 仓库。
+数据双向兼容范围 = Phase 4 迁移已逐项钉死的格式清单：SQLite schema（含 16 条补列 = 14 补列 + 2 既有，TS 侧只补列不破坏）、bcrypt 密码哈希、Fernet 加密字段、jwt_secret 文件、install_id、profiles.json、channels.json、email_dbs、workspace git 仓库。
 
 ## 5. 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `VIBE_HOME` | `%USERPROFILE%\.vibe-seller` | 数据根目录（`data/` 子目录放库、密钥、install_id） |
-| `BACKEND_PORT` | `7777` | 服务监听端口（127.0.0.1） |
+| `BACKEND_PORT` | `7777` | 服务监听端口（绑定地址见下一行） |
+| `BACKEND_HOST` | `127.0.0.1` | 服务监听地址；缺省仅 loopback。改绑 `0.0.0.0` 对局域网开放属用户显式决定（防火墙/反代/暴露面自担） |
 | `FRONTEND_DIST` | `<包>\frontend` | 前端静态目录（随包，一般不用改） |
 | `JWT_SECRET` | 无 | 覆盖 JWT 密钥；缺省用 `data/jwt_secret` 文件（首次启动自动生成，0600） |
 | `ADMIN_USERNAME` | `admin` | 首启 admin 种子用户名 |

@@ -16,8 +16,10 @@
 //     不是 Bearer 头——PRD §3.2"Bearer 头"与原实现冲突，以原实现为准（TS auth 的
 //     tokenFromRequest cookie 优先、Bearer 回退，两者判定等价）。
 //   - 错误包装：工具执行失败 → 成功结果 content 里的单键 {"error": str(e)}，不是
-//     协议层 error（原 :307-308）；对 ToolCallResult 的判别与
-//     packages/bridge/src/mcp.ts:138-151（原 MCP stdio 客户端）逐字一致。
+//     协议层 error（原 mcp_server.py:307-308，send_email 无账户同形 :173）；对
+//     ToolCallResult 的判别以同一错误包形状为准（schema 对账钉子 =
+//     test/fixtures/mcp-tools.json；原 MCP stdio 客户端 packages/bridge/src/mcp.ts
+//     已随 Phase 5.2 退役）。
 //   - 已知差异（均注释在点）：进程内自调没有 httpx 的 60s 转发超时层（原 :66 默认
 //     timeout=60）——该超时只作用于 loopback 转发，不作用于 server handler 本身，
 //     进程内等价于 handler 自身时长，generate_image 的"无超时等人工确认"语义由此
@@ -733,9 +735,10 @@ export interface NativeToolPortDeps {
 }
 
 /**
- * 结果判别（packages/bridge/src/mcp.ts:138-151 同一判别式，对齐原 MCP stdio 客户端
- * 的消费语义）：单键 {"error": …} → error 状态；其余 → success（数组/对象原样，
- * 原语包 {text}）。未知工具走同一出口（原 :304 返回单键 error 文本）。
+ * 结果判别（原 mcp_server.py:307-308 错误包形状的同一判别式——错误包 =
+ * 成功结果 JSON 里的单键 {"error": …}；原 MCP stdio 客户端消费同一形状，该客户端
+ * 已随 Phase 5.2 退役）：单键 {"error": …} → error 状态；其余 → success（数组/
+ * 对象原样，原语包 {text}）。未知工具走同一出口（原 :304 返回单键 error 文本）。
  */
 function toToolCallResult(parsed: unknown): ToolCallResult {
   const looksLikeError =

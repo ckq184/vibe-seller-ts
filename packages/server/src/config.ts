@@ -12,6 +12,11 @@ export interface ServerConfig {
   dbPath: string;
   jwtSecretFile: string;
   port: number;
+  /** 监听地址（BACKEND_HOST）：readServerConfig 缺省填 127.0.0.1——分发文档承诺
+   * 服务只听 loopback；改绑 0.0.0.0 是用户显式决定（见 docs/deploy.md）。
+   * 可选（与 frontendDist/jwtSecret 同例）：手工构造 config 的测试不必全填，
+   * 消费方（main.ts serve）兜底 127.0.0.1。 */
+  host?: string;
   frontendDist?: string;
   adminEmail: string;
   adminPassword: string;
@@ -36,6 +41,7 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     dbPath: join(dataDir, "vibe_seller.db"),
     jwtSecretFile: join(dataDir, "jwt_secret"),
     port,
+    host: env.BACKEND_HOST ?? "127.0.0.1",
     frontendDist: frontendDist && existsSync(frontendDist) ? frontendDist : undefined,
     adminEmail: env.ADMIN_EMAIL ?? "admin@vibe-seller.local",
     adminPassword: env.ADMIN_PASSWORD ?? "admin",

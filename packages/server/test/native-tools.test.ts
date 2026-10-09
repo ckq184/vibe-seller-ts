@@ -482,7 +482,7 @@ describe("错误包装与参数语义（原 handle_tool_call except 分支 / Key
     expect(r.error!.code).toBe("tool_error");
   });
 
-  it("单键 {error} 的正常响应 → 判别为 error 状态（bridge mcp.ts:138-146 同一判别式）", async () => {
+  it("单键 {error} 的正常响应 → 判别为 error 状态（原 mcp_server.py:307-308 错误包同一判别式）", async () => {
     const port = createNativeToolPort({
       app,
       taskId: "t",

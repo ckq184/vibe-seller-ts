@@ -31,11 +31,19 @@ export function openDb(cfg: ServerConfig): DatabaseSync {
   return db;
 }
 
-/** PRAGMA-guarded ALTER：缺列才补（对齐原 _ensure_added_columns）。 */
+/** PRAGMA-guarded ALTER：缺列才补（对齐原 _ensure_added_columns）。
+ * 并发窗口语义：两个进程同时 openDb 同一老库时，本进程的 PRAGMA 快照可能早于
+ * 对方补列——ALTER 撞 "duplicate column name" 视为列已存在（幂等）；其余错误
+ * 照常抛出。SQLite 写操作语句级串行，两进程最终 schema 一致。 */
 export function ensureColumn(db: DatabaseSync, table: string, column: string, ddlType: string): void {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddlType}`);
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddlType}`);
+    } catch (err) {
+      if (err instanceof Error && /duplicate column name/i.test(err.message)) return;
+      throw err;
+    }
   }
 }
 

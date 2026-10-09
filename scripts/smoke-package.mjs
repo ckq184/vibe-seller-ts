@@ -14,13 +14,8 @@
 // 零真网：两场景 server 端都设 VIBE_SELLER_TELEMETRY=0（遥测门控不建客户端）。
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import {
-  existsSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -106,6 +101,25 @@ async function waitFor(desc, probe, timeoutMs = 30000) {
   }
 }
 
+/** 等日志文件"定稿"：字节数连续 quietMs 无增长才返回（B10 的 ERROR 断言必须读
+ * 定稿后的日志——此前用 child.exitCode===null 作探针是恒真伪等待，首测即过，
+ * 日志可能还在写）。*/
+async function waitForLogSettled(file, { quietMs = 1500, timeoutMs = 20000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = -1;
+  let lastChange = Date.now();
+  for (;;) {
+    const size = existsSync(file) ? (await stat(file)).size : 0;
+    if (size !== last) {
+      last = size;
+      lastChange = Date.now();
+    }
+    if (Date.now() - lastChange >= quietMs) return size;
+    if (Date.now() > deadline) throw new Error(`waitForLogSettled 超时（${timeoutMs}ms）：${file} 持续增长中`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 function sessionCookie(setCookies) {
   const hit = setCookies.find((c) => c.startsWith("vibe_session=")) ?? setCookies[0];
   if (!hit) throw new Error("登录响应没有 set-cookie");
@@ -142,9 +156,11 @@ function runBat(name, env) {
 }
 
 // ── 场景 A：全新安装（start.bat 同款 env，start/stop.bat 真实走一遍） ──
-async function scenarioA() {
+// homes 数组由调用方传入：home 一经创建立刻登记（fail 抛出也不泄漏临时 VIBE_HOME）。
+async function scenarioA(homes) {
   step("场景 A：全新安装（bundled node + start.bat → 五步断言 → stop.bat 停）");
   const home = mkdtempSync(join(tmpdir(), "vibe-smoke-a-"));
+  homes.push(home);
   const port = await freePort();
   const env = { ...process.env, VIBE_HOME: home, BACKEND_PORT: String(port) };
   const started = await runBat("start.bat", env);
@@ -198,14 +214,29 @@ async function scenarioA() {
       ? ok("A7 pid 文件已清理")
       : fail("A7 pid 文件已清理");
     ok("A8 stop.bat 后服务确实停止（pid 消失 + 端口失联）");
+
+    // A9 幂等：pid 文件已无，再跑 stop.bat 仍是 no-op 退出 0
+    const again = await runBat("stop.bat", env);
+    again.status === 0 && !existsSync(join(home, "vibe-seller.pid"))
+      ? ok("A9 stop.bat 幂等（无 pid 文件时 no-op 退出 0）")
+      : fail("A9 stop.bat 幂等", `status=${again.status} ${again.note}`);
+
+    // A10 防误杀守卫：pid 文件指到非 node 进程（pid 4 = System，恒存在且非 node）
+    // → stop.bat 只清 pid 文件、绝不杀，System 仍存活，退出码 0
+    writeFileSync(join(home, "vibe-seller.pid"), "4");
+    const stale = await runBat("stop.bat", env);
+    stale.status === 0 && !existsSync(join(home, "vibe-seller.pid")) && pidAlive(4)
+      ? ok("A10 stop.bat 防误杀（pid=4 非 node → 只清 pid 文件，System 存活）")
+      : fail("A10 stop.bat 防误杀", `status=${stale.status} pidFileRemoved=${!existsSync(join(home, "vibe-seller.pid"))} systemAlive=${pidAlive(4)}`);
   }
   return home;
 }
 
 // ── 场景 B：Python → TS 原地升级 ──
-async function scenarioB() {
+async function scenarioB(homes) {
   step("场景 B：Python→TS 原地升级（venv 种子 → 同 VIBE_HOME 捆绑 TS server）");
   const home = mkdtempSync(join(tmpdir(), "vibe-smoke-b-"));
+  homes.push(home);
   const seedEnv = {
     ...process.env,
     VIBE_HOME: home,
@@ -291,11 +322,13 @@ async function scenarioB() {
       ? ok("B9 data/install_id 不变", installIdAfter)
       : fail("B9 data/install_id 不变", `before=${installIdBefore} after=${installIdAfter}`);
 
-    await waitFor("TS server 安静下来（日志定稿）", async () => child.exitCode === null, 1500);
+    // 日志定稿（真实等待：errLog 字节数连续 1.5s 无增长）再断言无 ERROR——
+    // 此前 child.exitCode===null 探针恒真（服务还在跑首测即过），是伪等待。
+    const settledBytes = await waitForLogSettled(errLog);
     const errText = readFileSync(errLog, "utf8");
     const errorLines = errText.split("\n").filter((line) => /error/i.test(line));
     errorLines.length === 0
-      ? ok("B10 启动日志无 ERROR", `errLog ${errText.length} 字节`)
+      ? ok("B10 启动日志无 ERROR（日志定稿后断言）", `errLog ${errText.length} 字节（settled at ${settledBytes}）`)
       : fail("B10 启动日志无 ERROR", errorLines.slice(0, 5).join(" | "));
   } finally {
     // 停 TS server：kill 后按进程存活与端口失联判定（不依赖 exit 事件——
@@ -328,8 +361,8 @@ if (!existsSync(REFERENCE_PYTHON)) {
 }
 const homes = [];
 try {
-  homes.push(await scenarioA());
-  homes.push(await scenarioB());
+  await scenarioA(homes); // home 一经创建即登记进 homes（fail 抛出不泄漏）
+  await scenarioB(homes);
 } finally {
   for (const home of homes) {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });

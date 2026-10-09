@@ -118,4 +118,31 @@ describe("ensureSchema 老库补列（_ensure_added_columns 全量移植）", ()
     expect(again.finalize_enabled_at).toBe(stamp);
     reopened.close();
   });
+
+  it("列已存在（大小写变体）→ ensureColumn 视 duplicate column name 为幂等，openDb 仍绿", () => {
+    // 并发窗口的确定性等价复现：老库列名大小写不同（如 PLAN_MODE），ensureColumn 的
+    // PRAGMA 精确匹配判为缺列，但 SQLite 列名大小写不敏感 → ALTER 抛
+    // "duplicate column name"。两进程并发 openDb 同一老库（对方已补列、本进程
+    // PRAGMA 读的是补列前快照）走的就是同一条"判缺→ALTER 撞重"路径——
+    // duplicate 必须视为已存在（幂等绿），其余错误照常抛出。
+    dir = mkdtempSync(join(tmpdir(), "vibe-db-upgrade-case-"));
+    const dbPath = join(dir, "vibe_seller.db");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE schedules (id VARCHAR NOT NULL, title VARCHAR NOT NULL,
+        finalize_description TEXT, PLAN_MODE BOOLEAN, PRIMARY KEY (id));
+      INSERT INTO schedules VALUES ('sc1', '老调度', NULL, 0);
+    `);
+    legacy.close();
+
+    const db = openDb(minimalConfig(dbPath));
+    // 列仍是老名字（duplicate 分支不重建列），其余补列与数据照常
+    const cols = (db.prepare("PRAGMA table_info(schedules)").all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("PLAN_MODE");
+    expect(cols).not.toContain("plan_mode");
+    expect(cols).toContain("finalize_enabled_at");
+    const row = db.prepare("SELECT * FROM schedules WHERE id = 'sc1'").get() as Record<string, unknown>;
+    expect(row.title).toBe("老调度");
+    db.close();
+  });
 });

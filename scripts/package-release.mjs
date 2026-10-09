@@ -104,7 +104,17 @@ if (process.env.NODE_ZIP) {
   cpSync(process.execPath, nodeExe);
   nodeSource = `本机开发机 node.exe 复制（${process.version}）`;
 }
-const nodeVersion = spawnSync(nodeExe, ["--version"], { encoding: "utf8" }).stdout.trim();
+// 内嵌 node 自检（--version）：spawn 失败时 stdout 为 null，直接 .trim() 会以
+// TypeError 炸掉——先显式判空给可行动的报错（zip 损坏/解压不完整最常见）。
+const nodeProbe = spawnSync(nodeExe, ["--version"], { encoding: "utf8" });
+if (nodeProbe.error || typeof nodeProbe.stdout !== "string") {
+  die(
+    `内嵌 node.exe 自检失败（--version 无输出）：${nodeExe}` +
+      (nodeProbe.error ? ` - ${nodeProbe.error.message}` : "") +
+      "——检查嵌入来源（官方 zip 是否完整/本机 node 是否可复制）。",
+  );
+}
+const nodeVersion = nodeProbe.stdout.trim();
 
 // telemetry 根包定位（telemetry/core.ts 逐级向上找 name === "vibe-seller-ts" 的
 // package.json；release 树无仓库根，随包放一份安装元数据——等价原 Python
@@ -155,10 +165,16 @@ endlocal
 writeFileSync(
   join(releaseDir, "stop.bat"),
   bat(`@echo off
-rem vibe-seller stop script: kill the pid from the pid file. Tries a soft taskkill
-rem first, then force-terminates after 2s. Windows has no cross-process SIGTERM;
+rem vibe-seller stop script: kill the pid from the pid file, but only after
+rem verifying the pid still belongs to node.exe. Tries a soft taskkill first,
+rem then force-terminates after 2s. Windows has no cross-process SIGTERM;
 rem SQLite transaction atomicity keeps a hard kill safe - same class as the
 rem original stop.sh SIGKILL fallback.
+rem PID-REUSE GUARD: a stale pid file may name a pid the OS has reassigned to
+rem an unrelated process. tasklist /FI "PID eq %PID%" /FO CSV /NH yields the
+rem image name; anything other than node.exe (case-insensitive - including the
+rem localized INFO line for a dead pid) means: only remove the pid file, never
+rem kill. The guard is re-checked before the force kill.
 rem NOTE: echo lines inside if-blocks must NOT contain parentheses - an unescaped
 rem closing paren terminates the block at parse time and corrupts the script.
 rem System32 tools are referenced by absolute path so a polluted PATH (e.g. Git
@@ -172,22 +188,39 @@ if not exist "%PID_FILE%" (
 )
 for /f %%i in (%PID_FILE%) do set "PID=%%i"
 echo [stop.bat] stopping vibe-seller pid=%PID%
+call :image_of %PID%
+if /i not "%IMAGE%"=="node.exe" (
+  echo [stop.bat] pid %PID% is not node.exe - stale or reused pid file. Removing pid file without killing.
+  del "%PID_FILE%" >nul 2>&1
+  echo [stop.bat] stopped.
+  exit /b 0
+)
 %SystemRoot%\\System32\\taskkill.exe /PID %PID% >nul 2>&1
 ping -n 3 127.0.0.1 >nul
-%SystemRoot%\\System32\\tasklist.exe /FI "PID eq %PID%" 2>nul | %SystemRoot%\\System32\\find.exe "%PID%" >nul
-if not errorlevel 1 (
+call :image_of %PID%
+if /i "%IMAGE%"=="node.exe" (
   echo [stop.bat] still alive, force killing...
   %SystemRoot%\\System32\\taskkill.exe /F /PID %PID% >nul 2>&1
   ping -n 2 127.0.0.1 >nul
 )
 del "%PID_FILE%" >nul 2>&1
-%SystemRoot%\\System32\\tasklist.exe /FI "PID eq %PID%" 2>nul | %SystemRoot%\\System32\\find.exe "%PID%" >nul
-if not errorlevel 1 (
+call :image_of %PID%
+if /i "%IMAGE%"=="node.exe" (
   echo [stop.bat] FAILED to stop pid=%PID%
   exit /b 1
 )
 echo [stop.bat] stopped.
 endlocal
+exit /b 0
+
+:image_of
+rem Sets IMAGE (quotes stripped) to the image name of pid %1, or "none" when the
+rem pid has no process. Compare with if /i - CSV first token keeps original case.
+set "IMAGE="
+for /f "delims=," %%i in ('%SystemRoot%\\System32\\tasklist.exe /FI "PID eq %~1" /FO CSV /NH 2^>nul') do if not defined IMAGE set "IMAGE=%%i"
+if not defined IMAGE set "IMAGE=none"
+set IMAGE=%IMAGE:"=%
+goto :eof
 `),
 );
 
@@ -207,7 +240,8 @@ vibe-seller-ts/
   frontend/           # 前端构建产物（vendor 源构建，server 只读挂载）
   node/node.exe       # 内嵌 Node 运行时（${nodeVersion}，来源：${nodeSource}）
   start.bat           # 后台启动（pid 文件 + 日志落 $VIBE_HOME/logs）
-  stop.bat            # 按 pid 停止
+  stop.bat            # 按 pid 停止（先校验映像名仍是 node.exe 才杀；pid 已被复用/
+                      # 进程已换时只清 pid 文件、绝不杀）
   package.json        # 安装元数据（遥测版本号解析用，勿删）
   README-UPGRADE.md   # 本文件
 \`\`\`
@@ -222,10 +256,11 @@ vibe-seller-ts/
 
 \`\`\`bat
 start.bat   :: 后台启动；默认 VIBE_HOME=%USERPROFILE%\\.vibe-seller，BACKEND_PORT=7777
-stop.bat    :: 按 pid 停止
+stop.bat    :: 按 pid 停止（映像名校验：非 node.exe 的 pid 只清文件不杀，防误杀）
 \`\`\`
 
-启动后访问 http://127.0.0.1:7777/ 。日志在 %VIBE_HOME%\\logs\\server-err.log /
+启动后访问 http://127.0.0.1:7777/ 。服务缺省只绑定 127.0.0.1（BACKEND_HOST 可覆盖；
+改绑 0.0.0.0 对局域网开放属用户显式决定）。日志在 %VIBE_HOME%\\logs\\server-err.log /
 server-out.log（每次启动覆盖）。pid 文件：%VIBE_HOME%\\vibe-seller.pid。
 
 ## 从 Python 版原地升级
@@ -235,21 +270,23 @@ server-out.log（每次启动覆盖）。pid 文件：%VIBE_HOME%\\vibe-seller.p
 1. 停掉原 Python 版（原仓库 stop.sh / uv tool 环境下的停止方式）；
 2. 本包解压到任意目录（路径建议不含空格）；
 3. 运行 start.bat——首次 TS 启动自动补齐老库缺列（原 \\_ensure\\_added\\_columns
-   15 条全量移植）、沿用 jwt_secret / install_id / 店铺 / 设置 / 用户（bcrypt 直接验证）。
+   14 条全量移植 + 既有 2 条 = 16 列，PRAGMA 守卫幂等）、沿用 jwt_secret /
+   install_id / 店铺 / 设置 / 用户（bcrypt 直接验证）。
 
 ## 回退
 
 数据目录不动，换回原 Python 启动命令（原仓库 start.sh / uv tool install 的
 vibe-seller 入口）即可。数据双向兼容范围 = Phase 4 迁移已逐项钉死的格式清单：
-SQLite schema（含 15 条补列）、bcrypt 密码哈希、Fernet 加密字段、jwt_secret、
-install_id、profiles.json、channels.json、email_dbs、workspace git 仓库。
+SQLite schema（含 16 条补列 = 14 补列 + 2 既有）、bcrypt 密码哈希、Fernet 加密字段、
+jwt_secret、install_id、profiles.json、channels.json、email_dbs、workspace git 仓库。
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | VIBE_HOME | %USERPROFILE%\\.vibe-seller | 数据根目录（data/ 子目录放库与密钥） |
-| BACKEND_PORT | 7777 | 服务监听端口（仅 127.0.0.1） |
+| BACKEND_PORT | 7777 | 服务监听端口（绑定地址见下行） |
+| BACKEND_HOST | 127.0.0.1 | 服务监听地址，缺省仅 loopback；改绑 0.0.0.0 属用户显式决定（暴露面自担） |
 | FRONTEND_DIST | <包>\\\\frontend | 前端静态目录（随包，一般不用改） |
 | JWT_SECRET | 无 | 覆盖 JWT 密钥（缺省用 data/jwt_secret 文件，首次启动自动生成） |
 | ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_EMAIL | admin / admin / admin@vibe-seller.local | 首启 admin 种子凭据 |
