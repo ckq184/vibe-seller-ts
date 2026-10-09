@@ -17,6 +17,10 @@
 // 内部状态，fixture 步骤全部不读它），可观测面（schedule.plan_status=
 // 'planning'、current_planning_task_id 非空、trigger 409）两侧同态。
 
+// 时区钉死（批次 4.7 整改 B）：必须是首个 import——先于任何 app 代码执行，
+// 见 replay/tz-pin.ts。
+import "./replay/tz-pin";
+
 import { mkdtemp, rm } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";

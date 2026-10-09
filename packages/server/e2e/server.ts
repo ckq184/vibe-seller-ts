@@ -83,7 +83,9 @@ async function boot(): Promise<E2eServer> {
       } catch {
         /* 已关闭 */
       }
-      rmSync(homeDir, { recursive: true, force: true });
+      // 批次 4.7 整改 E2：SSE keep-alive 连接未排空时 Windows 句柄未释放会
+      // EBUSY——参照 replay.test.ts teardown 的 maxRetries/retryDelay 模式重试。
+      rmSync(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
   };
 }

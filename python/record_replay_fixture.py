@@ -57,6 +57,11 @@ os.environ['JWT_SECRET'] = 'record-replay-fixed-secret'
 os.environ['ADMIN_USERNAME'] = 'admin'
 os.environ['ADMIN_EMAIL'] = 'admin@vibe-seller.local'
 os.environ['ADMIN_PASSWORD'] = 'admin'
+# 批次 4.7 整改 B：时区锚显式钉死。fixture 的 settings/schedules timezone 字段
+# 是逐字符串比较的字面量 "Asia/Shanghai"（get_server_timezone 的解析结果随机器
+# 而异），录制与回放必须同一时区锚，换时区机器重录/回放才不假红。回放侧
+# （replay.test.ts 首个 import 的 replay/tz-pin.ts）钉同一个锚。
+os.environ['TZ'] = 'Asia/Shanghai'
 # 门控链的 CI 检测：任何一个非空都会让 telemetry 静默，录制与回放必须同态
 for _ci in ('CI', 'GITHUB_ACTIONS', 'BUILDKITE', 'GITLAB_CI', 'CIRCLECI', 'JENKINS_URL'):
     os.environ.pop(_ci, None)
@@ -204,6 +209,13 @@ STEPS: list[dict] = [
      'capture': {'user_1': 'id'}},
     {'name': 'user_create_duplicate', 'method': 'POST', 'path': '/api/users',
      'body': {'username': 'replaymember', 'password': 'pw2'}},
+    # 批次 4.7 整改 C：跨列唯一性（users.py:24-32 or_(username==value,
+    # email==value)）。username=A 的 email 的创建请求在原实现实际命中的是
+    # schemas/user.py _validate_username（field_validator，路由前执行）：username
+    # 禁 @ → 422 校验错误（400 的跨列分支经 API 不可达——username 无 @、email
+    # 必含 @，两列不可能相交，OR 谓词是防御面）。此步钉住可达校验形状。
+    {'name': 'user_create_username_eq_email_422', 'method': 'POST', 'path': '/api/users',
+     'body': {'username': 'member@replay-test.com', 'password': 'pw3'}},
     {'name': 'user_update', 'method': 'PUT', 'path': '/api/users/{{user_1}}',
      'body': {'email': 'member2@replay-test.com'}},
     {'name': 'login_member', 'method': 'POST', 'path': '/api/auth/login', 'auth': 'none',
@@ -280,6 +292,15 @@ STEPS: list[dict] = [
               'channel_id': 'replay-wecom'}},
     {'name': 'channel_configs', 'method': 'GET', 'path': '/api/channels/configs'},
     {'name': 'channel_active', 'method': 'GET', 'path': '/api/channels/active'},
+    # 批次 4.7 整改 A：channels 错误形状（原 channels.py:137-138/246-247 的
+    # 404 分支——poll/send 对未知 channel_id 恒 'Channel not found: <id>'）。
+    # 注意 configure 未知 channel_type 不录：原实现 get_channel 的 ValueError
+    # 在 configure 路由里**无人捕获**（channels.py:88），是进程内崩溃/真服
+    # 500 纯文本，不是设计的 API 错误形状（TS 侧 400 + detail 属改进型分歧，
+    # 见 routes_channels.ts 注释与迁移台账）。
+    {'name': 'channel_poll_missing_404', 'method': 'POST', 'path': f'/api/channels/{FAKE}/poll'},
+    {'name': 'channel_send_missing_404', 'method': 'POST', 'path': f'/api/channels/{FAKE}/send',
+     'body': {'content': 'x'}},
     {'name': 'channel_delete', 'method': 'DELETE', 'path': '/api/channels/replay-wecom'},
     # ── wecom-bots 家族（建/查/改/删；send 需真网不录） ──
     {'name': 'wecom_list_empty', 'method': 'GET', 'path': '/api/wecom-bots'},
@@ -322,6 +343,18 @@ STEPS: list[dict] = [
     {'name': 'profile_set_default', 'method': 'PATCH', 'path': '/api/profiles/{{profile_1}}/set-default'},
     {'name': 'profile_update', 'method': 'PUT', 'path': '/api/profiles/{{profile_1}}',
      'body': {'description': 'replay updated'}},
+    # 批次 4.7 整改 A：profiles 错误形状（以原 profiles.py:61/78/102/115 实际
+    # 分支为准——创建缺 name 是 KeyError → 400 str(KeyError)；update 未知 id 是
+    # ValueError → 400；delete default 是 ValueError → 400；set-default 未知 id
+    # 是 404。注意"未知 id DELETE → 404 / 重名创建 → 409"不成立：原实现 delete
+    # 缺失幂等 ok、create 重名静默覆盖，均无错误分支可录）。
+    {'name': 'profile_create_missing_name_400', 'method': 'POST', 'path': '/api/profiles',
+     'body': {'id': 'replay-bad-profile'}},
+    {'name': 'profile_update_missing_400', 'method': 'PUT', 'path': f'/api/profiles/{FAKE}',
+     'body': {'description': 'x'}},
+    {'name': 'profile_delete_default_400', 'method': 'DELETE', 'path': '/api/profiles/default'},
+    {'name': 'profile_set_default_missing_404', 'method': 'PATCH',
+     'path': f'/api/profiles/{FAKE}/set-default'},
     {'name': 'profiles_list_after', 'method': 'GET', 'path': '/api/profiles'},
     {'name': 'profile_delete', 'method': 'DELETE', 'path': '/api/profiles/{{profile_1}}'},
     # ── workspace 家族（记录环境无本地知识/技能包，与 TS 运行时同态） ──
@@ -402,6 +435,12 @@ STEPS: list[dict] = [
               'interval_value': 10080},
      'capture': {'sched_1': 'id'}, 'settle_ms': 300},
     {'name': 'schedule_get', 'method': 'GET', 'path': '/api/schedules/{{sched_1}}', 'settle_ms': 200},
+    # 批次 4.7 整改 D：interval ≥24h 的 trigger 字符串。Python timedelta str 在
+    # days!=0 时前缀 "N day(s), "（单复数）——minutes=10080 的 IntervalTrigger
+    # str 是 'interval[7 days, 0:00:00]'（APScheduler str(trigger) 拼自
+    # str(timedelta)）。10080 分钟远大于录制窗口，schedule 作业停在列表末尾
+    # （next_run 7 天后 > task_cleanup 的明天 03:30，两侧按 next_run 排序同态）。
+    {'name': 'cron_list_with_interval_schedule', 'method': 'GET', 'path': '/api/cron/jobs'},
     {'name': 'schedule_tasks_excludes_plan_only', 'method': 'GET',
      'path': '/api/schedules/{{sched_1}}/tasks'},
     {'name': 'schedule_trigger_plan_not_ready_409', 'method': 'POST',

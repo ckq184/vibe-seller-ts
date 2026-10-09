@@ -397,14 +397,43 @@ export function createApp(deps: AppDeps): Hono {
     requireAdmin(c, auth);
     const body = (await c.req.json().catch(() => ({}))) as { username?: string; email?: string; password?: string; role?: string };
     if (!body.username || !body.password) throw new HttpError(422, "username and password required");
-    const username = body.username.toLowerCase();
+    // 原 schemas/user.py _validate_username（UserCreate 的 field_validator，路由前
+    // 执行）：strip().lower() 后要求 3-50 位、无 @、[a-z0-9_-]；失败 → FastAPI 422
+    // {"detail":[{type:'value_error',loc:['body','username'],msg:'Value error, …',
+    // input,ctx:{error:{}}}]},input 是校验前的原始值。批次 4.7 整改 C：录制
+    // user_create_username_eq_email_422 钉死（此前 TS 无校验，会把带 @ 的
+    // username 当普通字符串建号）。
+    const usernameInput = String(body.username);
+    const username = usernameInput.trim().toLowerCase();
+    const invalidUsername =
+      username.length < 3 || username.length > 50
+        ? "Username must be 3-50 characters"
+        : username.includes("@")
+          ? "Username must not contain @"
+          : /^[a-z0-9_-]+$/.test(username)
+            ? null
+            : "Username: only a-z, 0-9, _, -";
+    if (invalidUsername) {
+      return c.json(
+        {
+          detail: [
+            { type: "value_error", loc: ["body", "username"], msg: `Value error, ${invalidUsername}`, input: usernameInput, ctx: { error: {} } },
+          ],
+        },
+        422,
+      );
+    }
     // 原 users.py create_user：跨列唯一性检查在 INSERT 前做，冲突恒 400
     //（'Username already in use' / 'Email already in use'）——批次 4.7.2 录制
     // 回放对齐（此前 TS 误用 409，原实现只有 email-accounts 复用才是 409）。
-    const dupUser = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+    // 批次 4.7 整改 C：_check_identifier_unique 是 or_(username==value,
+    // email==value)——username 撞任何已有用户的 email（或反向）同样拒。该分支
+    // 经原实现 API 不可达（上面的 username 校验禁 @、EmailStr 必含 @，两列不可
+    // 能相交），此处对齐 SQL 谓词为防御一致。
+    const dupUser = db.prepare("SELECT id FROM users WHERE username = ? OR email = ?").get(username, username);
     if (dupUser) throw new HttpError(400, "Username already in use");
     if (body.email) {
-      const dupEmail = db.prepare("SELECT id FROM users WHERE email = ?").get(body.email);
+      const dupEmail = db.prepare("SELECT id FROM users WHERE username = ? OR email = ?").get(body.email, body.email);
       if (dupEmail) throw new HttpError(400, "Email already in use");
     }
     if (body.role !== undefined && body.role !== "admin" && body.role !== "member") throw new HttpError(400, "Invalid role");

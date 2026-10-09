@@ -145,13 +145,22 @@ export class VibeScheduler {
 // cron → "cron[month='1', day='1', hour='3', minute='0']"，字段顺序
 // month day day_of_week hour minute（'*'/null 不受限字段省略）。
 
-/** timedelta str 的 [H:MM:SS] 形状（APScheduler 小时不补零：'0:01:00'）。 */
+/** timedelta str 的 [H:MM:SS] 形状（APScheduler 小时不补零：'0:01:00'）。
+ * ≥24h 时 Python timedelta str 带 "N day(s), " 前缀且单复数分立（timedelta
+ * hours=25 → '1 day, 1:00:00'）——str(IntervalTrigger) 即
+ * 'interval[7 days, 0:00:00]'。批次 4.7 整改 D：录制
+ * cron_list_with_interval_schedule（minutes=10080）钉死，此前 TS 误产出
+ * 'interval[168:00:00]'。 */
 function intervalTriggerDesc(ms: number): string {
   const pad = (n: number): string => String(n).padStart(2, "0");
-  const h = Math.floor(ms / 3_600_000);
-  const m = Math.floor((ms % 3_600_000) / 60_000);
-  const s = Math.floor((ms % 60_000) / 1000);
-  return `interval[${h}:${pad(m)}:${pad(s)}]`;
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86_400);
+  const rest = totalSeconds % 86_400;
+  const h = Math.floor(rest / 3_600);
+  const m = Math.floor((rest % 3_600) / 60);
+  const s = rest % 60;
+  const hms = `${h}:${pad(m)}:${pad(s)}`;
+  return days > 0 ? `interval[${days} ${days === 1 ? "day" : "days"}, ${hms}]` : `interval[${hms}]`;
 }
 
 function sortedNums(set: Set<number> | null): string | null {

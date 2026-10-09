@@ -32,6 +32,17 @@ describe("normalizeValue", () => {
     expect(normalizeValue(null, "commit")).toBeNull(); // system/info commit=null 保留
   });
 
+  it("job_id 拼 schedule_<uuid> → 归一（动态 schedule id）；静态 id 原样", () => {
+    expect(normalizeValue("schedule_437f4dfe-2206-4bb1-9192-860715939458", "job_id")).toBe("schedule_<uuid>");
+    expect(normalizeValue("schedule__catalog_sync", "job_id")).toBe("schedule__catalog_sync");
+    expect(normalizeValue("stall_reaper", "job_id")).toBe("stall_reaper");
+    // 非 job_id 键的同形字符串不归（规则只钉 /api/cron/jobs 的这个键；裸 UUID
+    // 规则匹配的是整体形状，复合串不命中 → 原样保留）
+    expect(normalizeValue("schedule_437f4dfe-2206-4bb1-9192-860715939458", "id")).toBe(
+      "schedule_437f4dfe-2206-4bb1-9192-860715939458",
+    );
+  });
+
   it("mtime 键 → <mtime>；*.db 条目 size → <dbsize>", () => {
     expect(normalizeValue(1791507304.197585, "mtime")).toBe("<mtime>");
     const entry = normalizeValue({ path: "data\\vibe_seller.db", is_dir: false, size: 212992 });

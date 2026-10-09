@@ -28,6 +28,12 @@ export function normalizeValue(value: unknown, key = ""): unknown {
   if (typeof value === "string") {
     if (key === "sha" || key === "commit") return "<sha>";
     if (key.toLowerCase().endsWith("version")) return "<ver>";
+    // job_id 拼动态 schedule id（原 cron.py f'schedule_{schedule_id}'，uuid 每库
+    // 各自 random）。静态 id（schedule__catalog_sync、系统作业）不匹配、原样比较。
+    // （批次 4.7 整改 D：cron_list_with_interval_schedule 步引入的动态面。）
+    if (key === "job_id" && /^schedule_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+      return "schedule_<uuid>";
+    }
     if (UUID_RE.test(value)) return "<uuid>";
     if (ISO_RE.test(value)) return "<iso>";
     if (DATE_RE.test(value)) return "<date>";

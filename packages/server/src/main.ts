@@ -25,11 +25,12 @@ export function applyPersistedTelemetryFlag(db: DatabaseSync): void {
 }
 
 /** 原 lifespan 的 app_started 计数段：store/task/活动 schedule/user 裸 int；
- * 统计失败发空 props（base properties 仍由 send() 合入）。 */
-export function sendAppStarted(db: DatabaseSync): void {
+ * 统计失败发空 props（base properties 仍由 send() 合入）。countFn 可注入
+ * （单测注入抛错查询覆盖统计失败分支，不必造坏库）。 */
+export function sendAppStarted(db: DatabaseSync, countFn?: (sql: string) => number): void {
   let props: Record<string, unknown>;
   try {
-    const count = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
+    const count = countFn ?? ((sql: string): number => (db.prepare(sql).get() as { n: number }).n);
     props = {
       store_count: count("SELECT COUNT(*) AS n FROM stores"),
       total_task_count: count("SELECT COUNT(*) AS n FROM tasks"),

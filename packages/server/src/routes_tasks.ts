@@ -91,13 +91,28 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-/** 原 stores.py:530 _replace_name_in_md_files：.md 文件里的旧店名引用替换（单文件失败不挡改名）。 */
+/** 原 stores.py:530 _replace_name_in_md_files：.md 文件里的旧店名引用替换
+ *（rglob 逐文件 try/except warning——单文件失败不挡改名）。批次 4.7 整改 E1：
+ * 目录遍历的 readdir/stat 同样逐条目容错 continue——此前一条 statSync 失败
+ * （竞态删除/坏符号链接）会中止整个 walk，与"单文件失败不挡改名"的语义相悖。 */
 function replaceNameInMdFiles(directory: string, oldName: string, newName: string): void {
   if (!existsSync(directory)) return;
   const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir)) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // 原 rglob 对不可读目录产出空序列——跳过该子树
+    }
+    for (const entry of entries) {
       const full = join(dir, entry);
-      if (statSync(full).isDirectory()) walk(full);
+      let isDirectory: boolean;
+      try {
+        isDirectory = statSync(full).isDirectory();
+      } catch {
+        continue; // 消失/不可 stat 的条目：对齐 Python 逐文件 warning 语义，跳过不中止
+      }
+      if (isDirectory) walk(full);
       else if (entry.endsWith(".md")) {
         try {
           const content = readTextSync(full);
