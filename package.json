@@ -10,9 +10,11 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
-    "bridge:build": "node packages/bridge/build.mjs"
+    "bridge:build": "node packages/bridge/build.mjs",
+    "e2e": "node -e \"const {existsSync}=require('node:fs');const d=process.env.FRONTEND_DIST||'D:/CKQ/workplace/_reference/vibe-seller-src/frontend/dist';if(!existsSync(d+'/index.html')){console.error('[e2e] skip: frontend dist not found:',d);process.exit(0)}\" && playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^24.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.3",
