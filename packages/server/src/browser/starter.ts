@@ -196,6 +196,47 @@ export class BrowserStarter {
     return { ok: true, proxy_port: session.cdpPort!, ws: `ws://127.0.0.1:${session.cdpPort}/client-aux` };
   }
 
+  // ── browse 工具懒启动入口（PRD §4.1 幂等懒启动：对齐原版 autostart 块——
+  //    存活即复用并 touch，不存活才经全局启动锁拉起；既有 start*/sweep 方法不动） ──
+
+  /** 会话存活快查（只读）：sessions Map（含 '_web'）有该 key 且 CDP 探活通过 →
+   * touch lastUsedAt（与 sweepIdleBrowsers 的空闲判定兼容：每次工具调用都续命）
+   * 并返回 cdpPort；无会话 / 探活失败 → null。绝不 kill、绝不删 Map 项——死会话
+   * 清理交给既有 startChrome 复用路径（kill 旧 proc + 重建）。 */
+  async peekCdpPort(key: string): Promise<number | null> {
+    const session = sessions.get(key);
+    if (!session || session.cdpPort === null) return null;
+    if (!(await cdpAlive(session.cdpPort, this.deps.fetchImpl))) return null;
+    session.lastUsedAt = Date.now();
+    return session.cdpPort;
+  }
+
+  /** 店铺 Chrome 懒启动（仅供 chrome 后端；ziniao 守卫在 browse 调用层）：
+   * 快路径 peek 命中 → 直接复用（不进锁）；慢路径经 withLaunchLock 拉起并落
+   * browser_sessions 行（与 startStoreSession chrome 分支同构）。锁被占 →
+   * BrowserBusyError 原样向外抛（文案点名持有者/时长，调用方透传为工具错误）。 */
+  async ensureStoreChrome(store: { id: string; name: string }, headless: boolean): Promise<{ cdpPort: number }> {
+    const alive = await this.peekCdpPort(store.id);
+    if (alive !== null) return { cdpPort: alive };
+    const session = await withLaunchLock(`ensure_session(${store.name})`, async () => {
+      const s = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
+      markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: s.cdpPort, chromePid: s.proc?.pid ?? null });
+      return s;
+    });
+    return { cdpPort: session.cdpPort! };
+  }
+
+  /** 店铺无关 web Chrome 懒启动（key/slug 均 '_web'，进程内管理，不落
+   * browser_sessions 行——对齐既有 startWebSession 语义）。 */
+  async ensureWebChrome(headless: boolean): Promise<{ cdpPort: number }> {
+    const alive = await this.peekCdpPort("_web");
+    if (alive !== null) return { cdpPort: alive };
+    const session = await withLaunchLock("ensure_web_session", () =>
+      startChrome("_web", { slug: "_web", headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl }),
+    );
+    return { cdpPort: session.cdpPort! };
+  }
+
   /** 空闲清扫：无活跃任务绑定 + 空闲 ≥ idleSeconds 的浏览器停掉。返回停止数。
    * 持有浏览器的任务态 = PENDING/QUEUED/DESIGNING/PLANNED/RUNNING（WAITING 不持有，
    * 唤醒走懒启动）。 */
