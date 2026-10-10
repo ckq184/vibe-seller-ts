@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// pre-commit hook 入口（宪法门禁④，PRD 路线3 §二④/§四）。
+//
+// 安装方式：npm run hooks:install（= git config core.hooksPath scripts/githooks，
+// 相对路径按 git ≥2.29 语义相对仓库根解析，本机 git 2.55 实证支持）；卸载用
+// git config --unset core.hooksPath。未安装时本 hook 不生效。
+//
+// 行为：转发同目录 scan-secrets.mjs 的 main——扫描 staged Added/Modified 内容，
+// 命中密钥模式即拒绝提交（exit 1）并列出 文件:行号 + 打码行；干净 exit 0。
+// 扫描对象只有 staged，不扫 unstaged/未跟踪（PRD §六.5）。
+//
+// 明示取舍（PRD §六.2）：--no-verify 可整体绕过本 hook，git hook 层无防御手段；
+// 防绕过靠代码质量审查核对 diff，不由本门禁承担。
+//
+// 转发实现：ESM 相对导入 "./scan-secrets.mjs" 按本文件的 import.meta.url 解析，
+// 与 cwd 无关——git 以仓库根为 cwd 调 hook、temp 仓跨目录引用本目录时均定位正确
+// （同 commit-msg 入口的已实证形态：Git for Windows sh 尊重 shebang，Node 24 对
+// extensionless 入口做 ESM 语法探测）。
+import { main } from "./scan-secrets.mjs";
+
+process.exitCode = main(process.argv);
