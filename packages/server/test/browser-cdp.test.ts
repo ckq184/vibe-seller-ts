@@ -4,8 +4,8 @@
 // 每命令超时、断连作废且绝不自动重试、sessionId 作用域事件分发、Target 方法形状、
 // overPort 装配（GET /json/version → webSocketDebuggerUrl → ws 建连）。
 
-import { describe, expect, it } from "vitest";
-import { CdpConnection, type CdpTransport } from "../src/browser/cdp";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CdpConnection, createWebSocketTransport, type CdpTransport } from "../src/browser/cdp";
 
 /** 内存假 CdpTransport：捕获 client→server 帧、脚本化 server→client 推送、可模拟断连。 */
 class FakeCdpTransport implements CdpTransport {
@@ -285,5 +285,136 @@ describe("CdpConnection.overPort：装配", () => {
         transportFactory: async () => new FakeCdpTransport(),
       }),
     ).rejects.toThrow(/webSocketDebuggerUrl/);
+  });
+
+  it("overPort 失败文案可操作（审查 Major1）：所有失败路径都带 'browser session not ready on port <port>' 前缀", async () => {
+    // 非 ok：前缀 + 端口 + /json/version 语义（原断言保留）
+    await expect(
+      CdpConnection.overPort(9224, {
+        fetchImpl: (async () => new Response("boom", { status: 500 })) as typeof fetch,
+        transportFactory: async () => new FakeCdpTransport(),
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9224/);
+    // 缺 webSocketDebuggerUrl：同前缀
+    await expect(
+      CdpConnection.overPort(9225, {
+        fetchImpl: (async () => new Response(JSON.stringify({ Browser: "chrome/x" }))) as typeof fetch,
+        transportFactory: async () => new FakeCdpTransport(),
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9225/);
+    // fetch 本身失败（端口上无监听 = 连接拒绝/超时的真实形态）：同前缀 + 原因
+    await expect(
+      CdpConnection.overPort(9226, {
+        fetchImpl: (async () => {
+          throw new Error("fetch failed (ECONNREFUSED)");
+        }) as typeof fetch,
+        transportFactory: async () => new FakeCdpTransport(),
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9226.*ECONNREFUSED/s);
+    // 建连（transportFactory）失败：同前缀 + 原因
+    await expect(
+      CdpConnection.overPort(9227, {
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9227/devtools/browser/g" }))) as typeof fetch,
+        transportFactory: async () => {
+          throw new Error("upgrade rejected");
+        },
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9227.*upgrade rejected/s);
+  });
+});
+
+// ── createWebSocketTransport：open 前失败必须 settle（审查 Major1：会话键防砖化）──
+// 假 WebSocket（stub 全局，零真网）：镜像真实 ws 的异步事件时序——生产代码在构造后同步
+// 挂监听是前提，事件在微任务里才触发（连接拒绝 / upgrade 拒绝都发生在 open 之前的异步窗口）。
+// 修复前：error/close 监听把事件转发给尚未注册（null）的回调 → promise 永不 settle
+// → browse 层 per-key connecting 互斥永久持有死 promise → 该会话键所有后续调用砖化。
+// 探针：Promise.race 短超时——修复前 probe === "pending"（不 settle），修复后必为 rejected。
+
+class StubWebSocket {
+  /** 每个测试注入的脚本：拿到实例后在微任务里 fire 事件（异步时序镜像真实 ws）。 */
+  static script: ((ws: StubWebSocket) => void) | null = null;
+  private readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
+  constructor(_url: string) {
+    queueMicrotask(() => StubWebSocket.script?.(this));
+  }
+  addEventListener(type: string, cb: (ev: unknown) => void): void {
+    const arr = this.listeners.get(type) ?? [];
+    arr.push(cb);
+    this.listeners.set(type, arr);
+  }
+  send(): void {
+    /* 测试不发送 */
+  }
+  close(): void {
+    /* 测试不关闭 */
+  }
+  fire(type: string, ev: unknown = {}): void {
+    for (const cb of [...(this.listeners.get(type) ?? [])]) cb(ev);
+  }
+}
+
+async function settleProbe(p: Promise<unknown>, withinMs: number): Promise<string> {
+  return Promise.race([
+    p.then(
+      () => "resolved",
+      (e: Error) => `rejected: ${e.message}`,
+    ),
+    new Promise<string>((r) => setTimeout(() => r("pending"), withinMs)),
+  ]);
+}
+
+describe("createWebSocketTransport：open 前失败必须 settle（审查 Major1）", () => {
+  afterEach(() => {
+    StubWebSocket.script = null;
+    vi.unstubAllGlobals();
+  });
+
+  it("open 前 error（连接拒绝镜像）→ promise reject（不永久挂起），原因含 url 与事件细节", async () => {
+    StubWebSocket.script = (ws) => ws.fire("error", { message: "ECONNREFUSED" });
+    vi.stubGlobal("WebSocket", StubWebSocket as unknown as typeof WebSocket);
+    const probe = await settleProbe(createWebSocketTransport("ws://127.0.0.1:9299/devtools/browser/x"), 500);
+    expect(probe).toMatch(/^rejected/);
+    expect(probe).toContain("ws://127.0.0.1:9299");
+    expect(probe).toContain("ECONNREFUSED");
+  });
+
+  it("open 前 close（无 error 先行，如 upgrade 被拒即断）→ 同样 reject 而非挂起", async () => {
+    StubWebSocket.script = (ws) => ws.fire("close", { code: 1006 });
+    vi.stubGlobal("WebSocket", StubWebSocket as unknown as typeof WebSocket);
+    const probe = await settleProbe(createWebSocketTransport("ws://127.0.0.1:9298/devtools/browser/x"), 500);
+    expect(probe).toMatch(/^rejected/);
+  });
+
+  it("open 后 error → 沿用现行为转发 onError；未注册 onError 时 error 事件也被内部监听兜住（不崩进程）", async () => {
+    const made: StubWebSocket[] = [];
+    StubWebSocket.script = (ws) => {
+      made.push(ws);
+      ws.fire("open");
+    };
+    vi.stubGlobal("WebSocket", StubWebSocket as unknown as typeof WebSocket);
+    // 已注册 onError：open 后 error 走回调转发（连接层作废语义的输入源，现行为保持）
+    const withCb = await createWebSocketTransport("ws://127.0.0.1:9297/devtools/browser/a");
+    const seen: Error[] = [];
+    withCb.onError((e) => seen.push(e));
+    made[0]!.fire("error", { message: "boom after open" });
+    expect(seen.length).toBe(1);
+    // 未注册 onError 的传输：error 事件由内部监听兜住，不得抛 unhandled error 崩进程
+    await createWebSocketTransport("ws://127.0.0.1:9297/devtools/browser/b");
+    made[1]!.fire("error", { message: "no listener" });
+  });
+
+  it("overPort 走真实 createWebSocketTransport + open 前失败 → reject 'browser session not ready on port <port>'（不挂起）", async () => {
+    StubWebSocket.script = (ws) => ws.fire("error", { message: "connection refused" });
+    vi.stubGlobal("WebSocket", StubWebSocket as unknown as typeof WebSocket);
+    const probe = await settleProbe(
+      CdpConnection.overPort(9296, {
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:9296/devtools/browser/g" }))) as typeof fetch,
+        // 不注 transportFactory：走真实 createWebSocketTransport（命中 stub 的 open 前失败）
+      }),
+      500,
+    );
+    expect(probe).toMatch(/^rejected: browser session not ready on port 9296/);
   });
 });

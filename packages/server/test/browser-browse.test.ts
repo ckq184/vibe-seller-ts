@@ -5,14 +5,14 @@
 // navigate 全链与 load 超时、连接复用与断连重建、tabs 语义、tab LRU（12 上限、活跃不关、
 // 最后一个不关）、read/eval 截断、act 各动作命令序列、120s 硬预算超时。
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb, seed } from "../src/db";
 import { hashPassword } from "../src/app";
 import type { ServerConfig } from "../src/config";
-import type { CdpTransport } from "../src/browser/cdp";
+import { createWebSocketTransport, type CdpConnectionDeps, type CdpTransport } from "../src/browser/cdp";
 import { BROWSE_TOOL_NAMES, BrowseToolkit, resetBrowseStateForTests } from "../src/browser/browse";
 
 // ── 内存假 CDP 服务端（脚本化：按 method 给 result / error / 挂起；可推事件、可断连） ──
@@ -773,5 +773,80 @@ describe("参数面校验", () => {
     await expect(toolkit.execute("vibe_seller_browser_read", { mode: "info", tab_id: "t-ghost" })).rejects.toThrow(
       /t-ghost/,
     );
+  });
+});
+
+// ── 首次建连 open 前失败 → 快速失败 + 下次调用重建（审查 Major1：会话键防砖化）──
+// 端到端镜像生产路径：第一次 transportFactory 调用走**真实** createWebSocketTransport
+//（stub 全局 WebSocket：微任务里 fire error、永不 open——连接拒绝的真实形态），修复前该
+// promise 永不 settle → per-key connecting 互斥永久持有死 promise → 本 key 所有后续调用
+// 每次烧满硬预算且无恢复路径。探针证明：失败要"快速"（大预算也不得烧满）且下一次调用
+//（工厂恢复）能重建连接——不许可死 promise 残留。
+
+class PreOpenErrorWebSocket {
+  private readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
+  constructor(_url: string) {
+    queueMicrotask(() => {
+      for (const cb of this.listeners.get("error") ?? []) cb({ message: "ECONNREFUSED" });
+    });
+  }
+  addEventListener(type: string, cb: (ev: unknown) => void): void {
+    const arr = this.listeners.get(type) ?? [];
+    arr.push(cb);
+    this.listeners.set(type, arr);
+  }
+  send(): void {
+    /* open 前失败，永不发送 */
+  }
+  close(): void {
+    /* 测试不关闭 */
+  }
+}
+
+describe("建连失败恢复（会话键防砖化）", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("第一次建连 open 前失败 → 快速 throw（大预算不烧满）；第二次工厂恢复成功且连接表干净", async () => {
+    vi.stubGlobal("WebSocket", PreOpenErrorWebSocket as unknown as typeof WebSocket);
+    scriptExistingTab();
+    server.on("Runtime.evaluate", () => ({ result: { value: 2 } }));
+    let factoryCalls = 0;
+    const deps: CdpConnectionDeps = {
+      fetchImpl: server.fetchImpl,
+      transportFactory: (url) => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) return createWebSocketTransport(url); // 真实生产路径 + open 前失败
+        return server.transportFactory(); // 第二次起工厂"恢复"（零参假件，结构面兼容注入）
+      },
+    };
+    // 大预算（60s）注入：失败必须发生在微任务级，绝不烧满预算
+    const tk = new BrowseToolkit(
+      { db, starter, headless: () => true },
+      "task-1",
+      { callBudgetMs: 60_000, loadTimeoutMs: 150, connectionDeps: deps },
+    );
+
+    const start = Date.now();
+    const probe = await Promise.race([
+      tk.execute("vibe_seller_browser_eval", { expression: "1+1" }).then(
+        () => "resolved" as const,
+        (e: Error) => `rejected: ${e.message}` as const,
+      ),
+      new Promise<string>((r) => setTimeout(() => r("pending"), 1200)),
+    ]);
+    expect(probe).toMatch(/^rejected: browser session not ready on port 9222/); // 可操作文案（非裸 fetch failed）
+    expect(Date.now() - start).toBeLessThan(5000); // 快速失败：未烧满 60s 预算
+
+    // 第二次调用（工厂已恢复）：成功建连，死 promise 无残留（connecting 已清）
+    const r = (await tk.execute("vibe_seller_browser_eval", { expression: "1+1" })) as { text: string };
+    expect(r.text).toBe("2");
+    // 连接表干净：恢复后恰好一条真连接，且第三次调用复用它（不再重建）
+    expect(server.fakes.length).toBe(1);
+    const r3 = (await tk.execute("vibe_seller_browser_eval", { expression: "1+1" })) as { text: string };
+    expect(r3.text).toBe("2");
+    expect(server.fakes.length).toBe(1);
+    expect(factoryCalls).toBe(2);
   });
 });

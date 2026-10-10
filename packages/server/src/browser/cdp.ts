@@ -17,22 +17,48 @@ export interface CdpTransport {
   onError(cb: (err: Error) => void): void;
 }
 
-/** 生产传输：浏览器级 ws 端点，open 后 resolve。 */
+/** 生产传输：浏览器级 ws 端点，open 后 resolve。
+ * 不变量（审查 Major1）：构造后**立即**挂 error/close 监听——open 之前触发的 error/close
+ * 一律 reject（含原因），保证 overPort 必然 settle（否则 browse 层 per-key connecting 互斥
+ * 会永久持有死 promise，该会话键所有后续调用砖化）；open 之后触发沿用回调转发，onError
+ * 回调缺省也由内部监听兜住（防 unhandled error 事件崩进程）；settle 后 reject 为 no-op。 */
 export function createWebSocketTransport(url: string): Promise<CdpTransport> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const messageCb: { fn: ((text: string) => void) | null } = { fn: null };
     const closeCb: { fn: (() => void) | null } = { fn: null };
     const errorCb: { fn: ((err: Error) => void) | null } = { fn: null };
+    let opened = false;
+    let settled = false;
+    const failBeforeOpen = (why: string): void => {
+      if (opened || settled) return; // settle 后 reject 为 no-op
+      settled = true;
+      reject(new Error(`CDP WebSocket failed before open (${why}): ${url}`));
+    };
     ws.addEventListener("message", (ev) => {
       const data: unknown = ev.data;
       // CDP 帧是文本帧（string）；二进制帧防御性解码，不产生静默乱码
       const text = typeof data === "string" ? data : new TextDecoder().decode(data as NodeJS.ArrayBufferView);
       messageCb.fn?.(text);
     });
-    ws.addEventListener("close", () => closeCb.fn?.());
-    ws.addEventListener("error", () => errorCb.fn?.(new Error(`CDP WebSocket error: ${url}`)));
+    ws.addEventListener("close", (ev) => {
+      if (!opened) {
+        const code = (ev as { code?: unknown } | undefined)?.code;
+        failBeforeOpen(`closed${typeof code === "number" ? ` code ${code}` : ""}`);
+        return;
+      }
+      closeCb.fn?.();
+    });
+    ws.addEventListener("error", (ev) => {
+      if (!opened) {
+        const detail = (ev as { message?: unknown } | undefined)?.message;
+        failBeforeOpen(detail ? `error: ${String(detail)}` : "error");
+        return;
+      }
+      errorCb.fn?.(new Error(`CDP WebSocket error: ${url}`));
+    });
     ws.addEventListener("open", () => {
+      opened = true;
       resolve({
         send: (text) => ws.send(text),
         close: () => ws.close(),
@@ -87,15 +113,29 @@ export class CdpConnection {
   }
 
   /** 经 GET http://127.0.0.1:<port>/json/version（2s 探活超时，同 starter.ts cdpAlive）取
-   * 浏览器级 webSocketDebuggerUrl 后建连。 */
+   * 浏览器级 webSocketDebuggerUrl 后建连。所有失败路径都包可操作前缀
+   * "browser session not ready on port <port>: <原因>"（审查 Major1：agent 拿到的
+   * 永远是含端口与语义的错误，而非裸 fetch failed）。 */
   static async overPort(port: number, deps: CdpConnectionDeps = {}): Promise<CdpConnection> {
     const fetchImpl = deps.fetchImpl ?? fetch;
-    const resp = await fetchImpl(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) });
-    if (!resp.ok) throw new Error(`CDP /json/version HTTP ${resp.status} (port ${port})`);
+    let resp: Response;
+    try {
+      resp = await fetchImpl(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`browser session not ready on port ${port}: CDP /json/version unreachable (${reason})`);
+    }
+    if (!resp.ok) throw new Error(`browser session not ready on port ${port}: CDP /json/version HTTP ${resp.status}`);
     const info = (await resp.json()) as { webSocketDebuggerUrl?: string };
     const wsUrl = info.webSocketDebuggerUrl;
-    if (!wsUrl) throw new Error(`CDP /json/version 未返回 webSocketDebuggerUrl (port ${port})`);
-    const transport = await (deps.transportFactory ?? createWebSocketTransport)(wsUrl);
+    if (!wsUrl) throw new Error(`browser session not ready on port ${port}: CDP /json/version 未返回 webSocketDebuggerUrl`);
+    let transport: CdpTransport;
+    try {
+      transport = await (deps.transportFactory ?? createWebSocketTransport)(wsUrl);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`browser session not ready on port ${port}: WebSocket 建连失败 (${reason})`);
+    }
     return new CdpConnection(transport, deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   }
 
