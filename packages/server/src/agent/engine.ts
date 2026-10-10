@@ -131,15 +131,15 @@ export function defaultEngineFactory(
       // 令牌必须能被本进程 auth 校验。
       authToken: mintServiceToken(loopback.db, loopback.jwtSecret),
       // browse 注入 = starter 与设置位缺一不可；未注入时 dispatch 走 disabled 兜底
-      //（native-tools.ts）。headless 读取：routes_browser.ts 的 readHeadless 未导出，
-      // 本地同款 SELECT 缺省 false（对齐其缺省语义），不为此重构该文件。
+      //（native-tools.ts）。headless 读取对齐 routes_browser.ts readHeadless 的同款语义：
+      // CI=true 强制 headless；否则读设置缺省 false（不为此重构该文件）。
       browse:
         starter && browseEnabled
           ? new BrowseToolkit(
               {
                 db: loopback.db,
                 starter,
-                headless: () => getSetting(loopback.db, "browser_headless") === "true",
+                headless: () => process.env["CI"] === "true" || getSetting(loopback.db, "browser_headless") === "true",
               },
               taskId,
             )
