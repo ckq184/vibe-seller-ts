@@ -15,7 +15,7 @@
 
 **前置**：一个可用模型 profile 的 API key；一个真实店铺（或先用测试店铺）。
 
-> **状态（2026-10-10）**：前置侦察完成，启动检查清单见 `docs/route1-prep.md`（profile 机制 / release 现状 / 操作序列 / 免启动自检）；待用户提供 Anthropic 兼容端点 API key（必需）与店铺（可选）。
+> **状态（2026-10-10，完成）**：用户已提供 StepFun 兼容端点 key（step-3.7-flash），三类完成条件全部真实跑通——① plan-only 设计任务（`/design` → planned + plan 落库）、② 单店铺 workspace 写入（闸门批准后 notes.md 实盘落盘 + git 自动提交 + set_task_result）、③ 确认闸门**双向**交互（批准=工具恰好执行一次；拒绝=工具零执行+模型明确复述拒绝）。免启动自检 2/2、打包冒烟 23/23、release 已重打包至 HEAD（含路线 2 的 27 工具）。验收记录见 `docs/审查记录.md`「真实任务验收记录」节；过程观察项（Windows curl GBK 编码、plan/start 两条路径语义、拒绝后 GUI 结果为空）已入台账。日常使用可直接 `release/vibe-seller-ts/start.bat` + 已配置的 stepfun profile。
 
 ## 路线 2：浏览器自动化工具（唯一的功能性缺口）
 
