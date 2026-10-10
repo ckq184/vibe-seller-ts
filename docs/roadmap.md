@@ -27,7 +27,7 @@
 
 **完成条件（建议）**：agent 在真实店铺页面上完成一次"导航 → 读取数据 → 回填 workspace/任务结果"的闭环，且与既有 BrowserStarter 启动锁/清扫语义不冲突。
 
-> **状态（2026-10-10）**：用户已启动，由另一会话窗口执行；新会话按 `AGENTS.md` → 本节开工，PRD 待该会话产出。
+> **状态（2026-10-10）**：实现完成——T1-T5 commit 链 `0e85f94`→`9b67185`→`22ecdd6`→`e391ef4`→`86bfe5b`（真 Chrome 冒烟暴露的 CDP flatten 事件顶层 sessionId 匹配缺陷修复）→`ab16054`（按需真实冒烟，`VIBE_BROWSER_SMOKE=1 npx vitest run packages/server/test/browser-real.smoke.test.ts`），PRD 见 `docs/route2-browser-tools-prd.md`（裸 CDP 裁决）。27 工具面（新增 `vibe_seller_browser_navigate/tabs/read/act/eval`）+ `browser_tools_enabled` 开关（缺省开，Settings 可关）；"导航→读取→act→eval→回填"闭环由假 CDP 级测试钉死、真 Chrome 冒烟实证通过，全量测试 482 通过 / 3 skipped。完成条件中"真实店铺页面闭环"待用户真实任务人工验收；ziniao 后端店铺暂不支持（PRD §5.1 边界：结构化错误，绝不 spawn 无登录态替代 Chrome）。已知限制：浏览器冷启动后首次 browse 调用可能连接失败（Chrome 开 CDP 端口约需 2s+），属 PRD §5.2 许可面，agent 下一调用即懒恢复。
 
 ## 路线 3：宪法门禁建设
 
