@@ -30,6 +30,7 @@
 import type { ToolCallResult, ToolIntent, ToolPort } from "@vibe/core";
 import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
+import { BROWSE_TOOL_NAMES } from "../browser/browse";
 import { createSessionToken, SERVICE_TOKEN_EXPIRE_SECONDS } from "../jwt";
 
 export interface McpToolDef {
@@ -537,6 +538,193 @@ export const MCP_TOOL_SCHEMAS: McpToolDef[] = [
 ];
 // ── 生成段结束 ──
 
+// ── browse 五工具手写段（路线 2 T4）──
+// 来源 = docs/route2-browser-tools-prd.md（§二功能目标 / §4.3 tab / §4.4 动作语义 /
+// §5.2 错误面 / §六.1/9 验收），非 Python ast 抽取（原仓库无这五个工具），
+// 不进 fixtures 对账（上方 MCP_TOOL_SCHEMAS 的 fixture 钉子只覆盖 22 个生成段工具）。
+// description = 模型面向审计契约（全英文），语义按 PRD：数据提取只走 read/eval 绝不
+// 截图（§七.5）；互动失败绝不自动重试（§4.2 铁律）；session 由服务端解析——参数面
+// 没有 URL/端口/连接端点（§二"防串店"语义）。
+const isBrowseToolName = (name: string): boolean => (BROWSE_TOOL_NAMES as readonly string[]).includes(name);
+
+const BROWSE_SESSION_PROP = {
+  type: "string",
+  enum: ["store", "web"],
+  description:
+    '"store" (default) = the browser bound to this task\'s store, with its persistent login state — use it for seller-center pages. "web" = the shared store-independent web browser.',
+} as const;
+
+export const BROWSE_TOOL_SCHEMAS: McpToolDef[] = [
+ {
+  "name": "vibe_seller_browser_navigate",
+  "description": "Navigate a browser tab to a URL. Only http:// and https:// URLs are allowed (file://, chrome:// etc. are refused). The page opens in the session's active tab, or in a NEW tab when new_tab=true. The call waits for the page load event for at most 30 seconds: a slow page returns load_state=\"timeout\" instead of failing — the tab may still be loading, so check before interacting. Returns {tab_id, url, title}. session=\"store\" (default) is the browser bound to this task's store (persistent login state — use it for seller-center pages); session=\"web\" is the shared store-independent web browser.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "url": {
+     "type": "string",
+     "description": "Absolute http:// or https:// URL to navigate to."
+    },
+    "new_tab": {
+     "type": "boolean",
+     "description": "Open the URL in a new tab instead of the active one (optional)."
+    },
+    "session": BROWSE_SESSION_PROP
+   },
+   "required": [
+    "url"
+   ]
+  }
+ },
+ {
+  "name": "vibe_seller_browser_tabs",
+  "description": "Manage the tabs of a browser session, one action per call. action=\"list\" returns [{tab_id, url, title, active}]; action=\"switch\" focuses the tab given by tab_id; action=\"close\" closes the tab given by tab_id (default: the active tab) and NEVER closes the last remaining tab.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "type": "string",
+     "enum": [
+      "list",
+      "switch",
+      "close"
+     ],
+     "description": "Which tab operation to perform."
+    },
+    "tab_id": {
+     "type": "string",
+     "description": "Target tab id from the list action (required for switch; optional for close — defaults to the active tab)."
+    },
+    "session": BROWSE_SESSION_PROP
+   },
+   "required": [
+    "action"
+   ]
+  }
+ },
+ {
+  "name": "vibe_seller_browser_read",
+  "description": "Read page content as data. mode=\"text\" returns innerText, mode=\"html\" returns outerHTML, mode=\"info\" returns tab metadata ({tab_id, url, title}). Output is truncated to max_chars (text default 8000, html default 20000) and reported with a truncated flag plus total_length. Structured data extraction MUST come from this tool or vibe_seller_browser_eval — NEVER from screenshots. Prefer passing a CSS selector (document.querySelector semantics) to scope the read to a subtree instead of pulling the whole page.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "mode": {
+     "type": "string",
+     "enum": [
+      "info",
+      "text",
+      "html"
+     ],
+     "description": "info = tab metadata; text = innerText; html = outerHTML."
+    },
+    "selector": {
+     "type": "string",
+     "description": "Optional CSS selector scoping the read to a subtree; omit for the whole page body."
+    },
+    "max_chars": {
+     "type": "integer",
+     "description": "Truncation limit (text default 8000, html default 20000)."
+    },
+    "tab_id": {
+     "type": "string",
+     "description": "Read this tab instead of the active one (optional)."
+    },
+    "session": BROWSE_SESSION_PROP
+   },
+   "required": [
+    "mode"
+   ]
+  }
+ },
+ {
+  "name": "vibe_seller_browser_act",
+  "description": "Perform exactly ONE interaction per call. Actions: click / hover (need selector), type (types text through the REAL input pipeline so framework listeners fire; optionally focuses selector first), press (key: Enter/Tab/Escape/Backspace/Delete/ArrowUp/ArrowDown/ArrowLeft/ArrowRight/PageUp/PageDown/Home/End), select (needs selector + value; fires input/change events so React-controlled selects update), scroll (dx/dy wheel), wait (polls for selector every 250ms up to timeout_ms, default 10000, or a plain delay of ms). There is no auto-wait: if an element is not there yet, wait first. If an interaction times out or fails, NEVER blindly retry the same call — re-read the page state first (a retried click/type double-submits and double-fills).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "type": "string",
+     "enum": [
+      "click",
+      "hover",
+      "type",
+      "press",
+      "select",
+      "scroll",
+      "wait"
+     ],
+     "description": "The single action to perform."
+    },
+    "selector": {
+     "type": "string",
+     "description": "CSS selector of the target element (required by click/hover/select; optional focus target for type; poll target for wait)."
+    },
+    "text": {
+     "type": "string",
+     "description": "Text to type (action=type)."
+    },
+    "value": {
+     "type": "string",
+     "description": "Value to select (action=select)."
+    },
+    "key": {
+     "type": "string",
+     "description": "Key name (action=press), e.g. Enter, Tab, Escape."
+    },
+    "dx": {
+     "type": "integer",
+     "description": "Horizontal wheel delta (action=scroll)."
+    },
+    "dy": {
+     "type": "integer",
+     "description": "Vertical wheel delta (action=scroll)."
+    },
+    "ms": {
+     "type": "integer",
+     "description": "Plain delay in ms (action=wait without selector)."
+    },
+    "timeout_ms": {
+     "type": "integer",
+     "description": "Selector-poll limit in ms (action=wait with selector, default 10000)."
+    },
+    "tab_id": {
+     "type": "string",
+     "description": "Act on this tab instead of the active one (optional)."
+    },
+    "session": BROWSE_SESSION_PROP
+   },
+   "required": [
+    "action"
+   ]
+  }
+ },
+ {
+  "name": "vibe_seller_browser_eval",
+  "description": "Evaluate a JavaScript expression in the page context and return its JSON value (promises are awaited). Escape hatch for what vibe_seller_browser_read/act cannot express — e.g. complex DOM structured extraction; prefer them when they suffice. The result is truncated to max_chars (default 20000). Make page-mutating changes through vibe_seller_browser_act instead: failed calls are never retried automatically, and side effects applied here are easy to double-apply.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "expression": {
+     "type": "string",
+     "description": "JavaScript expression to evaluate in the page; its value (or the value its promise resolves to) comes back as JSON."
+    },
+    "max_chars": {
+     "type": "integer",
+     "description": "Truncation limit for the JSON result (default 20000)."
+    },
+    "tab_id": {
+     "type": "string",
+     "description": "Evaluate in this tab instead of the active one (optional)."
+    },
+    "session": BROWSE_SESSION_PROP
+   },
+   "required": [
+    "expression"
+   ]
+  }
+ }
+];
+
 /** 原 mcp_tool_schemas.py:22-29：providers 保序去重 + 固定文案 + 默认模型 id。
  * 入参放宽为 Record（catalogPublic() 的返回形状），provider 取值转 String。 */
 export function imageModelGuide(catalog: readonly Record<string, unknown>[], defaultModel: string): string {
@@ -548,9 +736,10 @@ export function imageModelGuide(catalog: readonly Record<string, unknown>[], def
   );
 }
 
-/** 补全 generate_image 的动态位（enum + 指导语），其余工具原样返回。 */
+/** 补全 generate_image 的动态位（enum + 指导语），其余工具原样返回；
+ * 尾部追加 browse 五工具手写段（22 → 27，T4）。 */
 export function buildNativeToolSchemas(opts: { imageModelIds: readonly string[]; imageModelGuide: string }): McpToolDef[] {
-  return MCP_TOOL_SCHEMAS.map((t) => {
+  const mapped = MCP_TOOL_SCHEMAS.map((t) => {
     if (t.name !== "vibe_seller_generate_image") return t;
     const props = { ...(t.inputSchema as { properties: Record<string, Record<string, unknown>> }).properties };
     const model = props["model"] ?? {};
@@ -561,12 +750,16 @@ export function buildNativeToolSchemas(opts: { imageModelIds: readonly string[];
     };
     return { ...t, inputSchema: { ...(t.inputSchema as object), properties: props } };
   });
+  return [...mapped, ...BROWSE_TOOL_SCHEMAS];
 }
 
-/** 原 _visible_tools（mcp_server.py:40-47）：无能力 → 隐藏 generate_image。 */
-export function filterVisibleTools(schemas: readonly McpToolDef[], visionCapability: boolean): McpToolDef[] {
-  if (visionCapability) return [...schemas];
-  return schemas.filter((t) => t.name !== "vibe_seller_generate_image");
+/** 原 _visible_tools（mcp_server.py:40-47）：无能力 → 隐藏 generate_image。
+ * T4 第三参：browser_tools_enabled=false → 再隐藏五个 browse 名（缺省 true，
+ * 既有调用点零改动）。隐藏 ≠ 不可调用：dispatch 不查可见性。 */
+export function filterVisibleTools(schemas: readonly McpToolDef[], visionCapability: boolean, browserEnabled = true): McpToolDef[] {
+  let out = visionCapability ? [...schemas] : schemas.filter((t) => t.name !== "vibe_seller_generate_image");
+  if (!browserEnabled) out = out.filter((t) => !isBrowseToolName(t.name));
+  return out;
 }
 
 /**
@@ -732,6 +925,10 @@ export interface NativeToolPortDeps {
   authToken: string;
   /** 测试注入请求层（记录器/假上游）；缺省 app.request。 */
   request?: (path: string, init: RequestInit) => Promise<Response>;
+  /** browse 五工具执行器（BrowseToolkit 的结构化最小面——不 import 类，避免
+   * agent↔browser 反向耦合）。缺省/未接线 → dispatch 返回单键 error 兜底
+   * （PRD §六.9：可见性隐藏 ≠ 不可达，直调兜底）。 */
+  browse?: { execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 }
 
 /**
@@ -786,6 +983,11 @@ export function createNativeToolPort(deps: NativeToolPortDeps): ToolPort {
   };
 
   const handle = async (name: string, a: Record<string, unknown>): Promise<unknown> => {
+    // browse 五工具（T4）在 routeTool 之前拦截：不进 HTTP 路由面（routeTool 保持纯净）。
+    // 有执行器走执行器；未接线走单键 error 兜底（toToolCallResult 判 error status）。
+    if (isBrowseToolName(name)) {
+      return deps.browse ? await deps.browse.execute(name, a) : { error: "browser tools are disabled or not wired on this server" };
+    }
     if (name === "vibe_seller_send_email") return sendEmailFlow(a);
     if (name === "vibe_seller_list_wecom_bots") {
       // 原 :237-244：API 返回打码 URL，剥离为 {id,name}——webhook secret 不进代理结果

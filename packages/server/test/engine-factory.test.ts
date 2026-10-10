@@ -11,6 +11,7 @@ import { createApp, hashPassword, type AppDeps } from "../src/app";
 import { openDb, seed } from "../src/db";
 import { EventBus } from "../src/bus";
 import { defaultEngineFactory } from "../src/agent/engine";
+import { BrowserStarter } from "../src/browser/starter";
 import type { ServerConfig } from "../src/config";
 
 let dir: string;
@@ -85,5 +86,45 @@ describe("defaultEngineFactory（原生 ToolPort）", () => {
   it("无 API key 且无 profiles → 工厂报错（既有守卫不变）", async () => {
     const factory = defaultEngineFactory({}, deps.config, { db: deps.db, app, jwtSecret: "test-secret" });
     await expect(factory({ taskId: "t3", profileId: "default" })).rejects.toThrow("未配置 VIBE_BRIDGE_API_KEY");
+  });
+});
+
+describe("browse 接线（T4：starter + browser_tools_enabled 设置位 → 注入/可见性）", () => {
+  // 工厂返回形状不变（toolSpecs 只进 makeEngine，不外露），27/22 的 schema 计数钉在
+  // native-tools.test.ts；本文件按该文件既有方式用 dispatch 行为钉接线三态。
+  // 构造 BrowserStarter 无副作用；断言走 BrowseToolkit 参数校验层（先于会话解析），
+  // 绝不 spawn Chrome。
+  const realStarter = () => new BrowserStarter({ config: deps.config, db: deps.db });
+  const setBrowserToolsEnabled = (value: string) => {
+    deps.db
+      .prepare("INSERT INTO app_settings (key, value) VALUES ('browser_tools_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(value);
+  };
+
+  it("传 starter 且设置开（缺省 true）→ browse 注入生效：dispatch 命中 BrowseToolkit 校验层（PRD scheme 守卫），而非 disabled 兜底", async () => {
+    const factory = defaultEngineFactory(factoryEnv, deps.config, { db: deps.db, app, jwtSecret: "test-secret", starter: realStarter() });
+    const per = await factory({ taskId: "t4a", profileId: "default" });
+    const r = await per.tools.execute({ name: "vibe_seller_browser_navigate", arguments: { url: "file:///etc/passwd" } } as ToolIntent, new AbortController().signal);
+    expect(r.status).toBe("error");
+    expect(r.error!.message).toContain("navigate refused");
+  });
+
+  it("browser_tools_enabled=false → 22 工具面（browse 隐藏）：dispatch 走 disabled 兜底（starter 在场也不注入）", async () => {
+    setBrowserToolsEnabled("false");
+    try {
+      const factory = defaultEngineFactory(factoryEnv, deps.config, { db: deps.db, app, jwtSecret: "test-secret", starter: realStarter() });
+      const per = await factory({ taskId: "t4b", profileId: "default" });
+      const r = await per.tools.execute({ name: "vibe_seller_browser_navigate", arguments: { url: "https://example.com" } } as ToolIntent, new AbortController().signal);
+      expect(r.error).toEqual({ code: "tool_error", message: "browser tools are disabled or not wired on this server" });
+    } finally {
+      setBrowserToolsEnabled("true");
+    }
+  });
+
+  it("不传 starter → 22 工具面：dispatch 走 disabled 兜底（设置开与 starter 缺一不注入）", async () => {
+    const factory = defaultEngineFactory(factoryEnv, deps.config, { db: deps.db, app, jwtSecret: "test-secret" });
+    const per = await factory({ taskId: "t4c", profileId: "default" });
+    const r = await per.tools.execute({ name: "vibe_seller_browser_eval", arguments: { expression: "1+1" } } as ToolIntent, new AbortController().signal);
+    expect(r.error).toEqual({ code: "tool_error", message: "browser tools are disabled or not wired on this server" });
   });
 });

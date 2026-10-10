@@ -63,6 +63,7 @@ export interface AppDeps {
 const ALLOWED_KEYS = new Set([
   "auth_required",
   "browser_headless",
+  "browser_tools_enabled",
   "max_agent_concurrency",
   "default_schedule_phase_mode",
   "default_schedule_timezone",
@@ -76,7 +77,7 @@ const MAX_CONCURRENCY_LIMIT = 10;
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
 const SKILLS_AUTO_SYNC_DEFAULT = "true";
 const USER_SELECTABLE_PHASE_MODES = new Set(["fanout", "single", "two_phase"]);
-const BOOL_KEYS = new Set(["auth_required", "telemetry_enabled", "browser_headless", "skills_auto_sync_enabled"]);
+const BOOL_KEYS = new Set(["auth_required", "telemetry_enabled", "browser_headless", "browser_tools_enabled", "skills_auto_sync_enabled"]);
 const INT_RANGES: Record<string, [number, number]> = {
   max_agent_concurrency: [1, MAX_CONCURRENCY_LIMIT],
   task_retention_days: [0, MAX_TASK_RETENTION_DAYS],
@@ -279,6 +280,8 @@ export function createApp(deps: AppDeps): Hono {
     if (!("task_retention_days" in settings)) settings.task_retention_days = String(DEFAULT_TASK_RETENTION_DAYS);
     if (!("telemetry_enabled" in settings)) settings.telemetry_enabled = "true";
     if (!("browser_headless" in settings)) settings.browser_headless = "false";
+    // 路线 2 T4：browse 五工具可见性开关，缺省开（PRD §三：新能力默认可用，Settings 一键关）
+    if (!("browser_tools_enabled" in settings)) settings.browser_tools_enabled = "true";
     if (!("skills_auto_sync_enabled" in settings)) settings.skills_auto_sync_enabled = SKILLS_AUTO_SYNC_DEFAULT;
     // env 变量选择退出要反映到前端读到的值（app_settings.py:122），前端才不会
     // 在后端静默时初始化自己的 PostHog。
@@ -549,7 +552,10 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ── 批次 4.2/4.3：stores + tasks CRUD + agent 编排；4.4：调度；4.5：workspace/profiles/assistant ──
-  const engineFactory = deps.engineFactory ?? defaultEngineFactory(process.env, config, { db, app, jwtSecret });
+  // T4：starter 先于引擎工厂建（构造无副作用）——defaultEngineFactory 的 loopback
+  // 需要它做 browse 五工具的懒启动注入（路线 2 PRD §8.1）。
+  const starter = deps.starter ?? new BrowserStarter({ config, db });
+  const engineFactory = deps.engineFactory ?? defaultEngineFactory(process.env, config, { db, app, jwtSecret, starter });
   const orchestrator = new TaskOrchestrator({
     config,
     db,
@@ -582,7 +588,6 @@ export function createApp(deps: AppDeps): Hono {
   registerEventRoutes(app, { config, db, auth, bus });
   registerDidaRoutes(app, { config, db, auth, jwtSecret });
   registerZiniaoRoutes(app, { config, db, auth, jwtSecret });
-  const starter = deps.starter ?? new BrowserStarter({ config, db });
   registerBrowserRoutes(app, { config, db, auth, jwtSecret, starter });
   registerVisionRoutes(app, { config, db, auth, bus });
   registerAttachmentRoutes(app, { config, db, auth });

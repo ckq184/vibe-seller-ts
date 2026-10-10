@@ -14,6 +14,7 @@ import { createApp, hashPassword, type AppDeps } from "../src/app";
 import { openDb, seed } from "../src/db";
 import { EventBus } from "../src/bus";
 import {
+  BROWSE_TOOL_SCHEMAS,
   buildNativeToolSchemas,
   createNativeToolPort,
   filterVisibleTools,
@@ -21,6 +22,7 @@ import {
   mintServiceToken,
   MCP_TOOL_SCHEMAS,
 } from "../src/agent/native-tools";
+import { BROWSE_TOOL_NAMES } from "../src/browser/browse";
 import { catalogPublic, DEFAULT_MODEL, modelIds } from "../src/vision/vision";
 import type { ServerConfig } from "../src/config";
 
@@ -135,11 +137,11 @@ describe("schema 钉子（22 工具与原 Python 逐字段对账）", () => {
 describe("能力门（原 _visible_tools，无 KIE key 且非 fake → 隐藏 generate_image）", () => {
   const schemas = () => buildNativeToolSchemas({ imageModelIds: modelIds(), imageModelGuide: imageModelGuide(catalogPublic(), DEFAULT_MODEL) });
 
-  it("两态：false → 21 个且无 generate_image；true → 22 个全量", () => {
+  it("两态：false → 21+5=26 且无 generate_image；true → 27 全量（browse 段只受第三参管，见下组）", () => {
     const hidden = filterVisibleTools(schemas(), false);
-    expect(hidden).toHaveLength(21);
+    expect(hidden).toHaveLength(26);
     expect(hidden.map((t) => t.name)).not.toContain("vibe_seller_generate_image");
-    expect(filterVisibleTools(schemas(), true)).toHaveLength(22);
+    expect(filterVisibleTools(schemas(), true)).toHaveLength(27);
   });
 
   it("隐藏 ≠ 不可调用：dispatch 与可见性无关（原 tools/call 不查 _visible_tools，无 key 时端点自报 400 detail）", async () => {
@@ -148,6 +150,99 @@ describe("能力门（原 _visible_tools，无 KIE key 且非 fake → 隐藏 ge
     const r = await exec(port, "vibe_seller_generate_image", { prompt: "p" });
     expect(calls[0]).toMatchObject({ method: "POST", path: "/api/tasks/task-1/image/generate" });
     expect(r.status).toBe("success"); // 原实现无 raise_for_status：{detail} 按成功结果透出
+  });
+});
+
+describe("browse 五工具注册（T4：手写段，来源 route2 PRD，非 ast 抽取、不进 fixture 对账）", () => {
+  const schemas = () => buildNativeToolSchemas({ imageModelIds: modelIds(), imageModelGuide: imageModelGuide(catalogPublic(), DEFAULT_MODEL) });
+
+  it("build 后工具面 = fixture 22 + browse 5 = 27，browse 五名按 BROWSE_TOOL_NAMES 序追加在尾部", () => {
+    const all = schemas();
+    expect(all).toHaveLength(27);
+    expect(all.map((t) => t.name)).toEqual([...FIXTURE.map((t) => t.name), ...BROWSE_TOOL_NAMES]);
+  });
+
+  it("五 schema 契约钉子：required 面与 description 承载语义（PRD §二：数据只走 read/eval 绝不截图、互动失败绝不盲重试）", () => {
+    const byName = new Map(BROWSE_TOOL_SCHEMAS.map((t) => [t.name, t]));
+    expect(byName.size).toBe(5);
+    const descOf = (name: string): string => byName.get(name)!.description;
+    const reqOf = (name: string): unknown => byName.get(name)!.inputSchema["required"];
+
+    expect(reqOf("vibe_seller_browser_navigate")).toEqual(["url"]);
+    expect(descOf("vibe_seller_browser_navigate")).toContain("http");
+    expect(descOf("vibe_seller_browser_navigate")).toContain('load_state="timeout"');
+    expect(descOf("vibe_seller_browser_navigate")).toContain("{tab_id, url, title}");
+    expect(descOf("vibe_seller_browser_navigate")).toContain("seller-center");
+
+    expect(reqOf("vibe_seller_browser_tabs")).toEqual(["action"]);
+    expect(descOf("vibe_seller_browser_tabs")).toContain("NEVER closes the last");
+
+    expect(reqOf("vibe_seller_browser_read")).toEqual(["mode"]);
+    expect(descOf("vibe_seller_browser_read")).toContain("innerText");
+    expect(descOf("vibe_seller_browser_read")).toContain("outerHTML");
+    expect(descOf("vibe_seller_browser_read")).toContain("screenshots");
+    expect(descOf("vibe_seller_browser_read")).toContain("8000");
+    expect(descOf("vibe_seller_browser_read")).toContain("20000");
+
+    expect(reqOf("vibe_seller_browser_act")).toEqual(["action"]);
+    expect(descOf("vibe_seller_browser_act")).toContain("Enter");
+    expect(descOf("vibe_seller_browser_act")).toContain("NEVER");
+    expect(descOf("vibe_seller_browser_act")).toContain("re-read");
+
+    expect(reqOf("vibe_seller_browser_eval")).toEqual(["expression"]);
+    expect(descOf("vibe_seller_browser_eval")).toContain("20000");
+    expect(descOf("vibe_seller_browser_eval")).toContain("vibe_seller_browser_act");
+
+    // session 通用参数：三工具以上共享的 store/web 枚举（navigate/tabs/read/act/eval 全带）
+    for (const name of BROWSE_TOOL_NAMES) {
+      const props = (byName.get(name)!.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
+      expect(props["session"]!.enum).toEqual(["store", "web"]);
+    }
+  });
+
+  it("filterVisibleTools 第三参：false → 隐藏 5 个 browse 名且其余 22 原样；缺省 true（既有调用点零改动）", () => {
+    const noBrowser = filterVisibleTools(schemas(), true, false);
+    expect(noBrowser).toHaveLength(22);
+    expect(noBrowser.map((t) => t.name)).toEqual(FIXTURE.map((t) => t.name));
+    expect(filterVisibleTools(schemas(), false, false)).toHaveLength(21);
+    expect(filterVisibleTools(schemas(), true)).toHaveLength(27); // 第三参缺省 true
+  });
+
+  it("browse dispatch 命中 deps.browse（假 executor 记录调用返回哨兵；零 loopback 流量——routeTool 不接 browse 名）", async () => {
+    const calls: RecordedCall[] = [];
+    const seen: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const port = createNativeToolPort({
+      app,
+      taskId: "task-1",
+      authToken: "t",
+      request: recorder(calls),
+      browse: {
+        execute: async (name, args) => {
+          seen.push({ name, args });
+          return { sentry: "browse-ok", name };
+        },
+      },
+    });
+    const r = await exec(port, "vibe_seller_browser_read", { mode: "text", selector: "#price" });
+    expect(seen).toEqual([{ name: "vibe_seller_browser_read", args: { mode: "text", selector: "#price" } }]);
+    expect(calls).toHaveLength(0);
+    expect(r.status).toBe("success");
+    expect(r.result).toEqual({ sentry: "browse-ok", name: "vibe_seller_browser_read" });
+  });
+
+  it("无 deps.browse：dispatch → 单键 error 兜底（disabled，非 Unknown tool——browse 名在 routeTool 之前拦截）", async () => {
+    const calls: RecordedCall[] = [];
+    const r = await exec(makePort(calls), "vibe_seller_browser_navigate", { url: "https://example.com" });
+    expect(calls).toHaveLength(0);
+    expect(r.status).toBe("error");
+    expect(r.error).toEqual({ code: "tool_error", message: "browser tools are disabled or not wired on this server" });
+  });
+
+  it("可见性与 dispatch 独立：隐藏后仍可达，走 disabled 兜底（与 generate_image 的'隐藏≠不可调用'同构）", async () => {
+    expect(filterVisibleTools(schemas(), true, false).map((t) => t.name)).not.toContain("vibe_seller_browser_eval");
+    const r = await exec(makePort([]), "vibe_seller_browser_eval", { expression: "1+1" });
+    expect(r.status).toBe("error");
+    expect(r.error!.message).toBe("browser tools are disabled or not wired on this server");
   });
 });
 

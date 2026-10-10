@@ -190,6 +190,18 @@ describe("settings 契约", () => {
     expect(body.default_schedule_phase_mode).toBe("fanout");
     expect(body.unknown_key).toBeUndefined();
   });
+
+  it("browser_tools_enabled：GET 缺省回填 true；PUT bool 归一；非白名单键拒收不受影响", async () => {
+    const def = (await (await app.request("/api/settings")).json()) as Record<string, string>;
+    expect(def.browser_tools_enabled).toBe("true"); // 缺省回填
+    await app.request("/api/settings", { method: "PUT", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ browser_tools_enabled: false }) });
+    const off = (await (await app.request("/api/settings")).json()) as Record<string, string>;
+    expect(off.browser_tools_enabled).toBe("false"); // bool 归一
+    await app.request("/api/settings", { method: "PUT", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ browser_tools_enabled: "true", not_allowed_key: "x" }) });
+    const body = (await (await app.request("/api/settings")).json()) as Record<string, string>;
+    expect(body.browser_tools_enabled).toBe("true");
+    expect(body.not_allowed_key).toBeUndefined();
+  });
 });
 
 describe("users 契约（admin）", () => {

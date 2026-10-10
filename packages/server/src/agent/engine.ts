@@ -24,6 +24,9 @@ import type { GatePolicy } from "@vibe/core";
 import { readFileSync, statSync } from "node:fs";
 import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
+import { BrowseToolkit } from "../browser/browse";
+import type { BrowserStarter } from "../browser/starter";
+import { getSetting } from "../db";
 import { ProfileManager } from "../profiles/manager";
 import { VisionConfig, catalogPublic, DEFAULT_MODEL, isFake, modelIds } from "../vision/vision";
 import {
@@ -39,7 +42,7 @@ import type { ServerConfig } from "../config";
 export function defaultEngineFactory(
   env: NodeJS.ProcessEnv,
   config: ServerConfig,
-  loopback: { db: DatabaseSync; app: Hono; jwtSecret: string },
+  loopback: { db: DatabaseSync; app: Hono; jwtSecret: string; starter?: BrowserStarter },
 ): EngineFactory {
   const bridgeEnv = readEnv(env);
   const gates: GatePolicy | undefined = gatePolicyFor(bridgeEnv.gatedTools);
@@ -109,11 +112,16 @@ export function defaultEngineFactory(
     // 原生工具面每 run 组装：能力门此刻判定，等价原 MCP 每 run _visible_tools()
     // （mcp_server.py:40-47：无 KIE key 且非 fake → 隐藏 vibe_seller_generate_image）。
     // 隐藏 ≠ 不可调用：dispatch 与可见性无关（原 tools/call 同样不查可见性）。
+    // T4 browse 位（路线 2 PRD §六.9）：browser_tools_enabled 缺省 true，false 时
+    // 五个 browse 工具从 schema 隐藏；缺省语义 = 容错解析，仅 SELECT（getSetting）。
+    const browseEnabled = getSetting(loopback.db, "browser_tools_enabled") !== "false";
     const visionCapability = Boolean(new VisionConfig(config.homeDir).getKieApiKey()) || isFake();
     const schemas = filterVisibleTools(
       buildNativeToolSchemas({ imageModelIds: modelIds(), imageModelGuide: imageModelGuide(catalogPublic(), DEFAULT_MODEL) }),
       visionCapability,
+      browseEnabled,
     );
+    const starter = loopback.starter;
     const tools = createNativeToolPort({
       app: loopback.app,
       taskId,
@@ -122,6 +130,20 @@ export function defaultEngineFactory(
       // 附带——见 native-tools.ts 头注的实读裁决）。secret 用 app 解析后的同一把，
       // 令牌必须能被本进程 auth 校验。
       authToken: mintServiceToken(loopback.db, loopback.jwtSecret),
+      // browse 注入 = starter 与设置位缺一不可；未注入时 dispatch 走 disabled 兜底
+      //（native-tools.ts）。headless 读取：routes_browser.ts 的 readHeadless 未导出，
+      // 本地同款 SELECT 缺省 false（对齐其缺省语义），不为此重构该文件。
+      browse:
+        starter && browseEnabled
+          ? new BrowseToolkit(
+              {
+                db: loopback.db,
+                starter,
+                headless: () => getSetting(loopback.db, "browser_headless") === "true",
+              },
+              taskId,
+            )
+          : undefined,
     });
     const toolSpecs = toVibeToolSpecs(schemas);
     // 无进程可清 → dispose 恒空（返回件形状 tools/toolSpecs/dispose 不变）
