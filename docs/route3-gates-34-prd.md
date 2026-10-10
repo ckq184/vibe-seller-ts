@@ -21,7 +21,7 @@
 ## 三、③ 行为规格（commit-msg）
 
 - 校验对象：commit-msg 文件（`$1`）的**首行**（subject）。多行 message 只看首行。
-- 合法格式：`^(feat|fix|docs|chore|refactor|test|perf|build|ci|style|revert)(\([^)]+\))?: \S.*$`——类型白名单（宪法第 8 条九类 + 全部）、可选 parenthetical scope、冒号后必须有空格 + 非空 subject。
+- 合法格式：`^(feat|fix|docs|chore|refactor|test|perf|build|ci|style|revert)(\([^)]+\))?: \S.*$`——类型白名单（宪法第 8 条全部 **11** 个类型 token；本 PRD 初稿散文处"九类"为计数笔误，正则本身正确，据此勘误）、可选 parenthetical scope、冒号后必须有空格 + 非空 subject。
 - **"范围 - 摘要"的 " - " 分隔符不机审**（裁决）：宪法原文含此形状，但仓内存量提交存在 " - " 与 " + " 两种风格并存（如 `067072a` vs `cbf8e5e`），机审会误拒合法风格；门禁钉的是 Conventional Commits 的类型纪律核心，" - " 分隔作为 house style 写入 AGENTS.md 建议。此裁决记入审查记录供用户复核。
 - 豁免（首行匹配即放行）：`Merge ` 开头（git 自动生成）、`Revert "` 开头（git revert 自动生成）、`fixup! `/`squash! ` 前缀（交互式 rebase 中间态）。
 - 拒绝输出：逐条列出违规点（未知类型（并列出白名单）/缺 `: `/空 subject/空消息），exit 1。

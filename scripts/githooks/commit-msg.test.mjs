@@ -85,11 +85,13 @@ function commitWithMessage(repoDir, message) {
   return spawnSync("git", ["commit", "-F", msgFile], { cwd: repoDir, encoding: "utf8" });
 }
 
-// 把 hook 文件复制进 temp 仓（hooks-install 全链用：安装器要求 <root>/scripts/githooks 存在）
+// 把 hook 文件复制进 temp 仓（hooks-install 全链用：安装器要求 <root>/scripts/githooks
+// 同时存在 REQUIRED_HOOKS 全部文件——门禁④落地后含 pre-commit；pre-commit 运行时
+// 还要相对导入 scan-secrets.mjs 与 allowlist，故按"生产形态"一并复制）
 function copyHooksInto(repoDir) {
   const target = join(repoDir, "scripts", "githooks");
   mkdirSync(target, { recursive: true });
-  for (const name of ["commit-msg", "commit-msg.mjs"]) {
+  for (const name of ["commit-msg", "commit-msg.mjs", "pre-commit", "scan-secrets.mjs", "secret-allowlist.json"]) {
     writeFileSync(join(target, name), readFileSync(join(here, name)));
   }
   return target;
@@ -289,10 +291,13 @@ describe("hooks-install：幂等安装（temp 真仓）", () => {
     expect(readHooksPath(dir)).toBe("scripts/githooks");
   });
 
-  it("hook 文件缺失 → 退出 2 且拒绝配置", () => {
+  it("hook 文件缺失（只有 commit-msg、缺 pre-commit）→ 退出 2 且拒绝配置", () => {
     const dir = mkTemp(true);
+    copyHooksInto(dir);
+    rmSync(join(dir, "scripts", "githooks", "pre-commit"));
     const r = runNode(installerPath, [], dir);
     expect(r.status).toBe(2);
+    expect(r.stderr).toContain("pre-commit");
     expect(readHooksPath(dir)).toBe("");
   });
 
