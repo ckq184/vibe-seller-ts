@@ -23,12 +23,12 @@
 
 | 用途 | 命令 |
 |:---|:---|
-| 测试 | TODO |
-| 类型检查 | TODO |
-| 构建 / 编译 | TODO |
-| Lint | TODO |
-| 一键质量门禁（测试 + 类型 + 构建 + diff 检查） | TODO |
-| 本地运行 | TODO |
+| 测试 | `npm test` |
+| 类型检查 | `npm run typecheck` |
+| 构建 / 编译 | `npm run build:server` |
+| Lint | 未配置（引入 lint 属 CI/lint 配置变更，需用户单独批准） |
+| 一键质量门禁（测试 + 类型 + 构建 + diff 检查） | `npm run verify -- --scope <任务范围> --base <回滚点>` |
+| 本地运行 | `npm start` |
 
 ---
 
