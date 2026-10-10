@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+// commit-msg hook 入口（宪法门禁③，PRD 路线3 §二③/§三）。
+//
+// 安装方式：npm run hooks:install（= git config core.hooksPath scripts/githooks，
+// 相对路径按 git ≥2.29 语义相对仓库根解析，本机 git 2.55 实证支持）；卸载用
+// git config --unset core.hooksPath。未安装时本 hook 不生效。
+//
+// 明示取舍（PRD §三）：--no-verify 可整体绕过本 hook，git hook 层无防御手段；
+// 防绕过靠代码质量审查核对 diff，不由本门禁承担。
+//
+// 转发实现：ESM 相对导入 "./commit-msg.mjs" 按本文件的 import.meta.url 解析，
+// 与 cwd 无关——git 以仓库根为 cwd 调 hook、temp 仓跨目录引用本目录时均定位正确。
+// argv[2] = git 传入的提交信息文件路径，原样透传给校验模块的 main。
+//
+// shebang 实测依据（git 2.55.0.windows.5 + node v24.19.0，2026-10-10）：Git for
+// Windows 的 sh 尊重 #!/usr/bin/env node；Node 24 对 extensionless 入口做 ESM
+// 语法探测，本文件的 import 语句可被正确按 ESM 解析（temp 真仓 commit 实证）。
+import { main } from "./commit-msg.mjs";
+
+process.exitCode = main(process.argv);

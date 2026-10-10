@@ -11,6 +11,7 @@
     "start": "node scripts/dev-start.mjs",
     "test": "vitest run",
     "verify": "node scripts/verify.mjs",
+    "hooks:install": "node scripts/hooks-install.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "vendor": "node scripts/vendor-frontend.mjs",
     "vendor:check": "node scripts/vendor-frontend.mjs --check",
