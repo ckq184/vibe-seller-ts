@@ -15,6 +15,8 @@
 
 **前置**：一个可用模型 profile 的 API key；一个真实店铺（或先用测试店铺）。
 
+> **状态（2026-10-10）**：前置侦察完成，启动检查清单见 `docs/route1-prep.md`（profile 机制 / release 现状 / 操作序列 / 免启动自检）；待用户提供 Anthropic 兼容端点 API key（必需）与店铺（可选）。
+
 ## 路线 2：浏览器自动化工具（唯一的功能性缺口）
 
 **做什么**：给 TS agent 补 browse 类工具（基于 CDP 连 `BrowserStarter` 已管的 Chrome 会话，Playwright 或裸 CDP 待 PRD 裁决），让 agent 能真正操作店铺页面（原产品的核心场景：紫鸟/Shopee 卖家中心操作走 browser-use 链，按既定架构决定从未迁入 TS）。
@@ -25,6 +27,8 @@
 
 **完成条件（建议）**：agent 在真实店铺页面上完成一次"导航 → 读取数据 → 回填 workspace/任务结果"的闭环，且与既有 BrowserStarter 启动锁/清扫语义不冲突。
 
+> **状态（2026-10-10）**：用户已启动，由另一会话窗口执行；新会话按 `AGENTS.md` → 本节开工，PRD 待该会话产出。
+
 ## 路线 3：宪法门禁建设
 
 **做什么**：把 `docs/constitution.md` 第二节落地表里仍为"待建设"的四项建成机器门禁——① `verify` 一键脚本（测试+类型+构建+diff 范围四门禁合成一条命令，替代交付报告里的手工四门禁）→ ② 范围检查脚本（`git diff` 文件清单 vs 任务声明范围）→ ③ commit-msg hook（Conventional Commits 校验）→ ④ secret 扫描（gitleaks 或等价）。每建成一项把落地表状态改为脚本路径并删除过渡期安排。
@@ -33,7 +37,7 @@
 
 **注意**：宪法明示"CI/lint 配置变更需用户单独批准"——hook 与扫描器的引入本身要在启动时获得确认。
 
-> **状态（2026-10-10）**：① ② 已建成并通过双重审查——`npm run verify` 四门禁一键编排（`scripts/verify.mjs`）+ `scripts/check-scope.mjs` 范围检查门禁，提交 `6a47a74`/`aa7a3ab`，规格见 `docs/route3-gates-prd.md`，审查落档见 `docs/审查记录.md`；宪法落地表第 1/7/1.5 行已改为脚本路径。③ commit-msg hook 与 ④ secret 扫描按宪法需用户启动时单独批准，待批准后立项（规格沿用本 PRD 模式）。
+> **状态（2026-10-10）**：① ② 已建成并通过双重审查——`npm run verify` 四门禁一键编排（`scripts/verify.mjs`）+ `scripts/check-scope.mjs` 范围检查门禁，提交 `6a47a74`/`aa7a3ab`，规格见 `docs/route3-gates-prd.md`，审查落档见 `docs/审查记录.md`；宪法落地表第 1/7/1.5 行已改为脚本路径。③ commit-msg hook 与 ④ secret 扫描按宪法需用户启动时单独批准，待批准后立项；立项要点（方案取舍与开放问题）已固化于 `docs/route3-gates-34-next.md`。
 
 ## 路线 4：遗留台账清理
 
