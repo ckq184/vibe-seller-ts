@@ -122,3 +122,49 @@ describe("ensureWebChrome（'_web'，不落行）", () => {
     expect(await starter.peekCdpPort("_web")).toBeNull();
   });
 });
+
+// ── touch 语义与空闲清扫不冲突（路线 2 PRD §六.5 的 starter 侧直接证据）──
+// 本段用 fetchImpl 恒 ok 的 starter（cdpAlive 恒真）驱动真实代码路径：
+// peekCdpPort 快路径 touch lastUsedAt（starter.ts peekCdpPort 的 `session.lastUsedAt =
+// Date.now()` 行）→ 会话在 sweepIdleBrowsers 的 1s 空闲阈值下存活。**因果钉子**：删掉
+// starter.ts peekCdpPort 里那一行 touch，"peek 后存活"用例必红（lastUsedAt 停留在
+// ensure 时刻、老化越过阈值被清 → 二次 peek null），恢复该行即绿——这就是"touch 与
+// 清扫不冲突"的直接测试证据，而非经 browse 层的行为面间接推断。
+
+describe("peekCdpPort touch ↔ sweepIdleBrowsers（PRD §六.5 直接证据）", () => {
+  /** fetchImpl 恒 ok：任何 /json/version 都 200 → cdpAlive 恒真 → peek 快路径恒命中。 */
+  const okStarter = () =>
+    new BrowserStarter({
+      config,
+      db,
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch,
+    });
+
+  it("peek（touch）过的会话在 sweepIdleBrowsers(1) 下存活：二次 peek 返回同一端口", async () => {
+    const st = okStarter();
+    const store = { id: "st-touch-alive", name: "Touch 店A" };
+    // 慢路径建会话 A（lastUsedAt = t0；假 Chrome = process.execPath，spawn 即退，见文件头）
+    const ensured = await st.ensureStoreChrome(store, true);
+    expect(ensured.cdpPort).toBeGreaterThan(0);
+    // 真实睡眠 ≥1s：让 lastUsedAt（若不被 touch）老化越过 1s 清扫阈值——
+    // 不用假时钟，清扫的 cutoff 就是 Date.now() 差值语义
+    await new Promise((r) => setTimeout(r, 1100));
+    // 快路径 peek：命中 + touch（lastUsedAt 刷新到此刻）
+    const peeked = await st.peekCdpPort(store.id);
+    expect(peeked).toBe(ensured.cdpPort);
+    // 1s 空闲阈值清扫：被 touch 过 → lastUsedAt > cutoff → 存活
+    await st.sweepIdleBrowsers(1);
+    expect(await st.peekCdpPort(store.id)).toBe(ensured.cdpPort);
+  });
+
+  it("对照组：建会话后不 peek，同阈值清扫即被移出（二次 peek null = Map 项已删）", async () => {
+    const st = okStarter();
+    const store = { id: "st-touch-swept", name: "Touch 店B" };
+    await st.ensureStoreChrome(store, true);
+    await new Promise((r) => setTimeout(r, 1100)); // 同样老化越过 1s 阈值
+    // 不 peek（无 touch）→ 清扫：lastUsedAt 停在 ensure 时刻 < cutoff → 删 Map 项 + kill proc
+    await st.sweepIdleBrowsers(1);
+    // sessions Map 模块私有，从外部观察"被清"的可行表达 = peek 二次返回 null
+    expect(await st.peekCdpPort(store.id)).toBeNull();
+  });
+});
