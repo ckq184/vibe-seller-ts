@@ -139,7 +139,23 @@ afterAll(async () => {
   } catch {
     /* 已关 */
   }
-  if (dir) rmSync(dir, { recursive: true, force: true }); // 浏览器死后才 rm（profile 句柄已释放）
+  if (dir) {
+    // Windows：Chrome 主进程死后渲染子进程释放 profile 句柄有秒级延迟（实测 ~1/3 运行
+    // 在单次 rm 上 EBUSY/ENOTEMPTY）——重试消化，最终失败降级为警告（清理尽力而为，
+    // 不因句柄时序把已通过的用例染红）。
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if (attempt >= 5) {
+          console.warn(`[smoke] tmp dir cleanup failed (left at ${dir}):`, err instanceof Error ? err.message : err);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+  }
 });
 
 describe.skipIf(!process.env.VIBE_BROWSER_SMOKE || !chromePath)("真实浏览器冒烟（真 Chrome × navigate→read→act→eval→回填）", () => {
