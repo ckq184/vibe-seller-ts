@@ -97,6 +97,31 @@ async function cdpAlive(port: number, fetchImpl: FetchImpl = fetch): Promise<boo
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+const READINESS_POLL_MS = 250;
+const DEFAULT_READINESS_TIMEOUT_MS = 10_000; // Chrome 开 CDP 端口实测 ~2.3s，10s 留足余量
+
+/** ensure 慢路径的有界就绪等待（审查 Major2）：Chrome 开 CDP 端口实测 ~2.3s，spawn 即返回
+ * 会让 agent 首次调用必败、快速重试时 startChrome 复用检查把"启动中"误判"死亡"→ kill 重拉
+ * churn。只读轮询 cdpAlive（GET /json/version 探针，无任何副作用——PRD 4.2"绝不重试变异
+ * 命令"铁律不受影响，探针不是命令重发）。就绪即返回；超时 throw 可操作错误（含 pid 与
+ * 等待上限语义）；调用方 markSessionRow 保持"就绪后"时序，超时路径零假 running 行。 */
+async function waitForCdpReadiness(port: number, pid: number | null | undefined, fetchImpl: FetchImpl | undefined, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await cdpAlive(port, fetchImpl)) return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Chrome (pid ${pid ?? "unknown"}) did not expose its debugging port within ${timeoutMs}ms; browser session not started — inspect the Chrome process or retry the browse call.`,
+      );
+    }
+    await delay(READINESS_POLL_MS);
+  }
+}
+
 export interface StartChromeOpts {
   slug: string;
   headless: boolean;
@@ -137,6 +162,8 @@ export interface BrowserStarterDeps {
   config: { homeDir: string };
   db: DatabaseSync;
   fetchImpl?: FetchImpl;
+  /** ensure* 慢路径 spawn 后的就绪等待上限，缺省 10_000ms（仅测试注入小值）。 */
+  readinessTimeoutMs?: number;
 }
 
 function markSessionRow(db: DatabaseSync, storeId: string, patch: { status: string; cdpPort?: number | null; chromePid?: number | null }): void {
@@ -212,14 +239,17 @@ export class BrowserStarter {
   }
 
   /** 店铺 Chrome 懒启动（仅供 chrome 后端；ziniao 守卫在 browse 调用层）：
-   * 快路径 peek 命中 → 直接复用（不进锁）；慢路径经 withLaunchLock 拉起并落
-   * browser_sessions 行（与 startStoreSession chrome 分支同构）。锁被占 →
+   * 快路径 peek 命中 → 直接复用（不进锁）；慢路径经 withLaunchLock 拉起 + 有界就绪等待
+   *（waitForCdpReadiness：就绪才返回，防冷启动"启动中"被误判"死亡"的 kill/respawn
+   * churn），就绪后才落 browser_sessions 行（与 startStoreSession chrome 分支同构；
+   * 超时 throw 时零行写入——markSessionRow 时序保持"就绪后"）。锁被占 →
    * BrowserBusyError 原样向外抛（文案点名持有者/时长，调用方透传为工具错误）。 */
   async ensureStoreChrome(store: { id: string; name: string }, headless: boolean): Promise<{ cdpPort: number }> {
     const alive = await this.peekCdpPort(store.id);
     if (alive !== null) return { cdpPort: alive };
     const session = await withLaunchLock(`ensure_session(${store.name})`, async () => {
       const s = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
+      await waitForCdpReadiness(s.cdpPort!, s.proc?.pid, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
       markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: s.cdpPort, chromePid: s.proc?.pid ?? null });
       return s;
     });
@@ -227,12 +257,16 @@ export class BrowserStarter {
   }
 
   /** 店铺无关 web Chrome 懒启动（key/slug 均 '_web'，进程内管理，不落
-   * browser_sessions 行——对齐既有 startWebSession 语义）。 */
+   * browser_sessions 行——对齐既有 startWebSession 语义）。慢路径同样做有界就绪等待。 */
   async ensureWebChrome(headless: boolean): Promise<{ cdpPort: number }> {
     const alive = await this.peekCdpPort("_web");
     if (alive !== null) return { cdpPort: alive };
     const session = await withLaunchLock("ensure_web_session", () =>
-      startChrome("_web", { slug: "_web", headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl }),
+      startChrome("_web", { slug: "_web", headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl })
+        .then(async (s) => {
+          await waitForCdpReadiness(s.cdpPort!, s.proc?.pid, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
+          return s;
+        }),
     );
     return { cdpPort: session.cdpPort! };
   }
