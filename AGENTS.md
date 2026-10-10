@@ -28,6 +28,7 @@
 | 构建 / 编译 | `npm run build:server` |
 | Lint | 未配置（引入 lint 属 CI/lint 配置变更，需用户单独批准） |
 | 一键质量门禁（测试 + 类型 + 构建 + diff 检查） | `npm run verify -- --scope <任务范围> --base <回滚点>` |
+| 安装 git hooks（门禁③提交格式 + 门禁④secret 扫描；克隆/换机后执行一次，幂等） | `npm run hooks:install` |
 | 本地运行 | `npm start` |
 
 ---
@@ -37,20 +38,21 @@
 > 以下为真实信息（2026-10-10 填实）；架构 / 命令变化时按本文件维护规则同步更新。
 
 - **技术栈**：TypeScript ^5.6.3（strict / ES2022 / ESM，typecheck `noEmit`）+ Node.js ≥22.5（`node:sqlite` 底线；release 捆绑 v24）。后端 Hono ^4.6 + @hono/node-server ^1.13，存储 = `node:sqlite`（vibe_seller.db，原地升级向后兼容），bcryptjs ^3.0.2（兼容 Python bcrypt），自研最小 Fernet（跨语言互操作）；Agent 侧 = Pi Agent SDK（`@earendil-works/pi-coding-agent` 0.84.2 + `pi-ai`，schema 用 typebox 1.3.7）。测试 vitest ^3.2（单测+集成）与 Playwright ^1.64（e2e，前端零改动）；构建 esbuild ^0.24（server 单文件 bundle）。前端 React ^19.2（自参考仓库 vendor 进仓，字节级一致）。运行时依赖冻结零新增（Phase 4 预裁决），新增依赖须按宪法第 4 条说明理由。
-- **目录结构**：`packages/core`（@vibe/core：纯领域契约与确定性循环，零 SDK 零副作用）｜`packages/runtime`（执行托管：Session/Run/事件流/持久化/恢复/预算/取消）｜`packages/adapters-pi`（Pi SDK 适配：SDK 事件归一化为产品级事件流、ToolPort、反思/DoD）｜`packages/bridge`（进程内 agent 装配面：事件翻译 translator、多供应商 profiles、pi 引擎装配）｜`packages/server`（Hono Web 后端：179 端点、SSE 总线、27 原生工具（含 browse 五工具，browser/ = BrowserStarter + 裸 CDP 连接层）、workspace/profiles/email/channels/events/dida365/ziniao/vision）｜`frontend/`（vendor 前端，红线零改动）｜`scripts/`（dev-start、build-server、package-release、smoke-package、vendor-frontend、宪法门禁 check-scope+verify）｜`docs/`（宪法、工作流、路线图、PRD、审查记录）。`dist/`、`release/` 为 gitignored 构建产物。
-- **敏感区域（禁止自动修改；任务明确要求时也须先获用户单独批准）**：① `~/.vibe-seller/` 运行时数据目录（vibe_seller.db、jwt_secret、含明文 key 的 profiles.json、stores/ 店铺数据）；② `frontend/` vendor 前端——零改动红线（与参考仓库字节级一致，`npm run vendor:check` 门禁；前端改动只能在参考仓库做后重新 vendor）；③ 一切密钥与环境变量值（`VIBE_BRIDGE_API_KEY`、`ANTHROPIC_AUTH_TOKEN/API_KEY`、`JWT_SECRET`、`ADMIN_PASSWORD`、`VIBE_SMOKE_API_KEY`）——禁止写入代码/日志/文档/事件；④ `release/` 与 `dist/` 仅由脚本生成，不手改；⑤ CI / lint / git hooks 配置（现行均未配置）的引入或变更需用户单独批准（宪法第 6 条）；DB schema 变更须保持原地升级向后兼容（宪法第 2 条）。
+- **目录结构**：`packages/core`（@vibe/core：纯领域契约与确定性循环，零 SDK 零副作用）｜`packages/runtime`（执行托管：Session/Run/事件流/持久化/恢复/预算/取消）｜`packages/adapters-pi`（Pi SDK 适配：SDK 事件归一化为产品级事件流、ToolPort、反思/DoD）｜`packages/bridge`（进程内 agent 装配面：事件翻译 translator、多供应商 profiles、pi 引擎装配）｜`packages/server`（Hono Web 后端：179 端点、SSE 总线、27 原生工具（含 browse 五工具，browser/ = BrowserStarter + 裸 CDP 连接层）、workspace/profiles/email/channels/events/dida365/ziniao/vision）｜`frontend/`（vendor 前端，红线零改动）｜`scripts/`（dev-start、build-server、package-release、smoke-package、vendor-frontend、宪法门禁 check-scope+verify、githooks=门禁③commit-msg+门禁④secret 扫描+hooks-install）｜`docs/`（宪法、工作流、路线图、PRD、审查记录）。`dist/`、`release/` 为 gitignored 构建产物。
+- **敏感区域（禁止自动修改；任务明确要求时也须先获用户单独批准）**：① `~/.vibe-seller/` 运行时数据目录（vibe_seller.db、jwt_secret、含明文 key 的 profiles.json、stores/ 店铺数据）；② `frontend/` vendor 前端——零改动红线（与参考仓库字节级一致，`npm run vendor:check` 门禁；前端改动只能在参考仓库做后重新 vendor）；③ 一切密钥与环境变量值（`VIBE_BRIDGE_API_KEY`、`ANTHROPIC_AUTH_TOKEN/API_KEY`、`JWT_SECRET`、`ADMIN_PASSWORD`、`VIBE_SMOKE_API_KEY`）——禁止写入代码/日志/文档/事件；④ `release/` 与 `dist/` 仅由脚本生成，不手改；⑤ CI / lint / git hooks 配置的引入或变更需用户单独批准（宪法第 6 条；git hooks 现行 = 门禁③④，2026-10-10 经用户批准路线三引入，改动其校验逻辑同样需单独批准）；DB schema 变更须保持原地升级向后兼容（宪法第 2 条）。
 - **Golden Path（标准执行路径）**（本仓无 remote，止于本地提交）：
 
   ```bash
   git pull --ff-only        # 若配置了远程
   npm install               # 首次或 lockfile 变更后
+  npm run hooks:install     # 克隆/换机后一次：启用门禁③ commit-msg + 门禁④ secret 扫描
   # …任务实现（TDD；scope = 任务声明范围，base = 开工前 HEAD，即回滚点）
   npm run verify -- --scope <任务范围> --base <开工前 HEAD>   # 四门禁：类型检查→测试→构建→diff 范围
   git add <范围内文件>
-  git commit -m "type: 范围 - 摘要"   # Conventional Commits，每任务一提交（宪法第 8 条）
+  git commit -m "type: 范围 - 摘要"   # Conventional Commits（类型白名单机审=门禁③），每任务一提交（宪法第 8 条）
   ```
 
-  日常调试 `npm start`（dev-start 临时 bundle）；分发验收再 `npm run package` + `npm run smoke:package`。
+  日常调试 `npm start`（dev-start 临时 bundle）；分发验收再 `npm run package` + `npm run smoke:package`。提交信息建议 `type: 范围 - 摘要` 的" - "分隔 house style（不机审）；**禁止 `git commit --no-verify` 绕过门禁③④**（hook 层无防御手段，明示取舍，违者由代码质量审查核对 diff 追责）。
 
 ---
 

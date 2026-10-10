@@ -38,15 +38,15 @@
 |:---|:---|:---|:---|
 | 1 测试覆盖 | 测试命令纳入 CI/verify 脚本，无测试即失败 | scripts/verify.mjs（①测试门禁；逐文件无测试检测未建） | —— |
 | 2 向后兼容 | API 契约测试或 schema diff 检查 | 待建设 | 过渡期由代码质量审查核对 |
-| 3 敏感信息 | secret 扫描（如 gitleaks）纳入提交前检查 | 待建设 | 过渡期由代码质量审查核对 |
+| 3 敏感信息 | secret 扫描（如 gitleaks）纳入提交前检查 | scripts/githooks/pre-commit（scan-secrets.mjs 七模式 + 可审查 allowlist） | —— |
 | 4 依赖复用 | 交付报告显式列出依赖变更并说明理由，审查代理核对 | 人工审查（现行） | —— |
 | 5 前端四状态 | 页面组件状态检查清单模板，纳入规格审查 | 人工审查（现行） | —— |
 | 6 禁止绕过 | CI/lint 配置变更需用户单独批准 | 人工审查（现行） | —— |
 | 7 提交前三查 | `verify` 一键脚本（测试 + 类型检查 + 构建 + diff 检查） | scripts/verify.mjs | —— |
-| 8 提交规范 | commit-msg hook（commitlint 或等价脚本） | 待建设 | 过渡期人工核对提交信息格式 |
+| 8 提交规范 | commit-msg hook（commitlint 或等价脚本） | scripts/githooks/commit-msg（类型白名单 + 豁免 Merge/Revert/fixup） | —— |
 | 1.5 最小范围修改 | 范围检查脚本：`git diff` 文件清单 vs 任务声明范围 | scripts/check-scope.mjs | —— |
 
-> **建成顺序与截止**：待建设项按收益推进——① `verify` 一键脚本 ② 范围检查脚本 ③ commit-msg hook ④ secret 扫描。每建成一项，将状态改为脚本路径并删除过渡期安排。**过渡期截止时间由用户在下一个迭代启动时确认并写入本表**；逾期未建成的条款不得再以"人工审查"作为长期方案。
+> **建成状态（2026-10-10）**：落地表四项机器门禁全部建成——① verify 一键脚本、② 范围检查脚本（提交 `6a47a74`/`aa7a3ab`）、③ commit-msg hook、④ secret 扫描（提交 `12031c6`/`f075ac4`）。新环境克隆后需执行一次 `npm run hooks:install` 安装 git hooks；`git commit --no-verify` 可绕过 ③④（git hook 层无防御手段），属明示取舍，禁止使用。
 
 ---
 

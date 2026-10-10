@@ -37,7 +37,7 @@
 
 **注意**：宪法明示"CI/lint 配置变更需用户单独批准"——hook 与扫描器的引入本身要在启动时获得确认。
 
-> **状态（2026-10-10）**：① ② 已建成并通过双重审查——`npm run verify` 四门禁一键编排（`scripts/verify.mjs`）+ `scripts/check-scope.mjs` 范围检查门禁，提交 `6a47a74`/`aa7a3ab`，规格见 `docs/route3-gates-prd.md`，审查落档见 `docs/审查记录.md`；宪法落地表第 1/7/1.5 行已改为脚本路径。③ commit-msg hook 与 ④ secret 扫描按宪法需用户启动时单独批准，待批准后立项；立项要点（方案取舍与开放问题）已固化于 `docs/route3-gates-34-next.md`。
+> **状态（2026-10-10，四项全部建成）**：用户批准启动 ③④（"开始路线三"即宪法第 6 条要求的启动确认）。① ② 此前已建成（`6a47a74`/`aa7a3ab`，规格 `docs/route3-gates-prd.md`）；③④ 本轮建成——③ commit-msg hook（`12031c6`：类型白名单机审 + Merge/Revert/fixup 豁免 + `npm run hooks:install`，33 测试，dogfood 双向实证）+ ④ pre-commit secret 扫描（`f075ac4`：七模式 + 可审查 allowlist + staged 面扫描，39 测试，全仓基线审计 375 文件 0 命中），PRD 见 `docs/route3-gates-34-prd.md`（方案裁决：两门均取零依赖自写，gitleaks/commitlint 留待真实需要再评估）。宪法落地表四行全部为脚本路径、过渡期安排删除；`--no-verify` 绕过为明示取舍（AGENTS.md 禁令）。审查落档见 `docs/审查记录.md`。
 
 ## 路线 4：遗留台账清理
 
