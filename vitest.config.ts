@@ -9,7 +9,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/**/*.test.ts"],
+    include: ["packages/**/*.test.ts", "scripts/**/*.test.mjs"],
     // 套件是真 HTTP + 真文件系统 I/O（桥/编排器/调度器），Windows 上 12 路文件并行
     // 会把 gate-resume 的时序窗口压出偶发。压到 4 路：总时长可控，顺序敏感性消失。
     fileParallelism: true,
