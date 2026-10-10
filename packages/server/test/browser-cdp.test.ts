@@ -152,18 +152,31 @@ describe("CdpConnection：关闭与断连", () => {
 });
 
 describe("CdpConnection：事件分发", () => {
-  it("无 sessionId 订阅收所有同名事件；带 sessionId 只收负载 sessionId 匹配的", async () => {
+  it("flatten 事件按消息**顶层** sessionId 匹配（真 Chrome wire 格式）：无 sessionId 订阅收所有同名事件；带 sessionId 只收匹配的", async () => {
     const { conn, fake } = await makeConn();
     const all: unknown[] = [];
     const scoped: unknown[] = [];
     conn.on("Page.loadEventFired", (p) => all.push(p));
     conn.on("Page.loadEventFired", (p) => scoped.push(p), { sessionId: "s1" });
-    fake.fromServer({ method: "Page.loadEventFired", params: { sessionId: "s2", frameId: "f2" } });
-    fake.fromServer({ method: "Page.loadEventFired", params: { sessionId: "s1" } });
-    fake.fromServer({ method: "Page.loadEventFired", params: {} });
-    fake.fromServer({ method: "Other.event", params: { sessionId: "s1" } });
+    // wire 格式由真实冒烟抓帧钉死（2026-10-10）：flatten 模式下事件的 sessionId 在消息
+    // **顶层**，与命令帧同位；params 内不含。假件必须镜像该形状（本用例即回归断言：
+    // 旧实现只读 params.sessionId，曾致带 sessionId 订阅在真 Chrome 上永不触发）。
+    fake.fromServer({ method: "Page.loadEventFired", params: { frameId: "f2" }, sessionId: "s2" });
+    fake.fromServer({ method: "Page.loadEventFired", params: {}, sessionId: "s1" });
+    fake.fromServer({ method: "Page.loadEventFired", params: {} }); // 浏览器级事件（无会话）
+    fake.fromServer({ method: "Other.event", params: {}, sessionId: "s1" });
     expect(all.length).toBe(3); // 三个同名事件全收，Other.event 不收
-    expect(scoped).toEqual([{ sessionId: "s1" }]); // 只收 s1，s2/无 sessionId 不收
+    expect(scoped).toEqual([{}]); // 只收顶层 sessionId=s1 的那帧；s2/无会话不收
+  });
+
+  it("params 内嵌 sessionId 兼容路径仅防御（真 Chrome 恒为顶层，见上用例）", async () => {
+    const { conn, fake } = await makeConn();
+    const scoped: unknown[] = [];
+    conn.on("Page.loadEventFired", (p) => scoped.push(p), { sessionId: "s1" });
+    fake.fromServer({ method: "Page.loadEventFired", params: { sessionId: "s1" } });
+    expect(scoped).toEqual([{ sessionId: "s1" }]);
+    fake.fromServer({ method: "Page.loadEventFired", params: { sessionId: "s2" } });
+    expect(scoped).toEqual([{ sessionId: "s1" }]); // 不匹配不收
   });
 
   it("off 注销后不再分发", async () => {

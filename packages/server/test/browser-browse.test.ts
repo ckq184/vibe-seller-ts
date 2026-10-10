@@ -100,9 +100,11 @@ class FakeCdpServer {
     const responder = this.responders.get(method);
     fake.fromServer({ id: frame.id, result: responder ? responder(frame) : {} });
   }
-  /** 推一条事件通知到当前连接。 */
-  fire(method: string, params: Record<string, unknown> = {}): void {
-    this.fake.fromServer({ method, params });
+  /** 推一条事件通知到当前连接。flatten wire 格式：sessionId 在消息**顶层**（与真 Chrome
+   * 抓帧一致——旧形状内嵌 params 曾喂中 cdp.ts 只读 params.sessionId 的缺陷，
+   * 2026-10-10 真实冒烟暴露后修正；本假件编码即回归镜像）。 */
+  fire(method: string, params: Record<string, unknown> = {}, sessionId?: string): void {
+    this.fake.fromServer(sessionId !== undefined ? { method, params, sessionId } : { method, params });
   }
   readonly transportFactory = async (): Promise<FakeCdpTransport> => {
     const f = new FakeCdpTransport(this);
@@ -280,7 +282,7 @@ describe("navigate", () => {
 
     const p = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example" });
     await until(() => server.fake.frames("Page.navigate").length === 1, "Page.navigate frame");
-    server.fire("Page.loadEventFired", { sessionId: "sess-1" });
+    server.fire("Page.loadEventFired", {}, "sess-1");
     const r = (await p) as { tab_id: string; url: string; title: string; load_state: string };
 
     expect(r).toEqual({ tab_id: "t-new", url: "https://x.example/", title: "X Title", load_state: "loaded" });
@@ -336,7 +338,7 @@ describe("navigate", () => {
     server.on("Runtime.evaluate", () => ({ result: { value: JSON.stringify({ href: "https://w.example/", title: "W" }) } }));
     const p = toolkit.execute("vibe_seller_browser_navigate", { url: "https://w.example", session: "web" });
     await until(() => server.fake.frames("Page.navigate").length === 1, "Page.navigate frame");
-    server.fire("Page.loadEventFired", { sessionId: "sess-1" });
+    server.fire("Page.loadEventFired", {}, "sess-1");
     await p;
     expect(starter.calls).toEqual([{ method: "ensureWebChrome", headless: true }]);
     const row = db.prepare("SELECT current_url FROM browser_sessions WHERE store_id = 'st-ch'").get() as {
@@ -477,7 +479,7 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     // 1) navigate：活跃 = t01（touch t01 → LRU 最新）
     const p1 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example" });
     await until(() => server.fake.frames("Page.navigate").length === 1, "first navigate");
-    server.fire("Page.loadEventFired", { sessionId: "sess-1" });
+    server.fire("Page.loadEventFired", {}, "sess-1");
     await p1;
 
     // 2) read 显式寻址 t05 → touch t05（比 t01 更新；t01 成为 LRU 最旧但它是活跃）
@@ -493,7 +495,7 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     const closedId = String((server.fake.frames("Target.closeTarget")[0]!.params as { targetId: string }).targetId);
     list = list.filter((t) => t.targetId !== closedId);
     await until(() => server.fake.frames("Page.navigate").length === 2, "second navigate");
-    server.fire("Page.loadEventFired", { sessionId: "sess-1" });
+    server.fire("Page.loadEventFired", {}, "sess-1");
     const r2 = (await p2) as { tab_id: string };
 
     expect(closedId).toBe("t05"); // LRU 最旧的非活跃

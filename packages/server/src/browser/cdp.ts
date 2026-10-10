@@ -210,7 +210,7 @@ export class CdpConnection {
   }
 
   private handleText(text: string): void {
-    let msg: { id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: unknown };
+    let msg: { id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: unknown; sessionId?: unknown };
     try {
       msg = JSON.parse(text);
     } catch {
@@ -230,12 +230,16 @@ export class CdpConnection {
       return;
     }
     if (typeof msg.method === "string") {
-      this.dispatchEvent(msg.method, msg.params);
+      this.dispatchEvent(msg.method, msg.params, msg.sessionId);
     }
   }
 
-  private dispatchEvent(method: string, params: unknown): void {
-    const sid = (params as { sessionId?: unknown } | null)?.sessionId;
+  /** 事件会话归属匹配。flatten wire 格式（真实 Chrome 抓帧钉死，2026-10-10 冒烟暴露）：
+   * 事件的 sessionId 在消息**顶层**、与命令帧同位，params 内不含——旧实现只读
+   * params.sessionId 曾致带 sessionId 订阅在真 Chrome 上永不触发（navigate 恒
+   * load_state:"timeout"）。顶层优先；params 内嵌仅为防御性兼容读取（真端点不产生）。 */
+  private dispatchEvent(method: string, params: unknown, eventSessionId: unknown): void {
+    const sid = eventSessionId !== undefined ? eventSessionId : (params as { sessionId?: unknown } | null)?.sessionId;
     for (const sub of [...this.eventSubs]) {
       if (sub.event !== method) continue;
       if (sub.sessionId !== undefined && sub.sessionId !== sid) continue;
