@@ -1,12 +1,89 @@
 # vibe-seller-ts
 
-[vibe-seller](https://github.com/zpoint/vibe-seller)（跨境卖家 AI 自动化框架）向 pi Agent SDK 架构的 TypeScript 迁移基座。原项目用 Claude Code CLI 包装做 agent 内核；本仓库按 **Agent Core / Runtime / 适配器** 三层重建内核，方向即原项目 `DESIGN.md` 规划的长期目标（Own Agent Runtime）。
-
-方法与契约遵循 pi-coding-agent 技能（`@earendil-works/pi-coding-agent@0.84.2` 基线）：
+本地优先的电商卖家 AI Agent 工作台 —— [vibe-seller](https://github.com/zpoint/vibe-seller)（Python 跨境卖家自动化框架）向 pi Agent SDK 架构的 TypeScript 重写版，完成原项目 `DESIGN.md` 规划的长期目标（Own Agent Runtime）。单机运行（默认只绑 `127.0.0.1:7777`），数据全部落在 `~/.vibe-seller/`，前端字节级继承原版 React 界面。
 
 ```
 Task → Context → 模型决策 → 工具动作 → 观察 → 状态推进 → 结果/下一轮
 ```
+
+## 功能
+
+- **真实模型驱动的任务 Agent**：接一个 Anthropic Messages 兼容端点（StepFun / GLM / Kimi / DeepSeek 等 9 家预设），对店铺建任务，agent 用原生工具完成"调研 → 计划 → 执行 → 回填结果"闭环；plan-only 设计任务、cron 定时调度、多店 fanout 均支持。
+- **27 个原生工具**：任务/店铺/日程管理、workspace 读写、邮件（自研 IMAP/SMTP）、企业微信机器人、事件（dida365 / Google Calendar）、图片生成（vision，人工确认卡）、以及 **5 个浏览器工具**（navigate / tabs / read / act / eval——裸 CDP 驱动本机 Chrome，操作卖家中心页面完成"导航 → 读取 → 回填"）。
+- **确认闸门**：把任意工具名加入 `VIBE_BRIDGE_GATED_TOOLS`，agent 调用即挂起等人工批准/拒绝（默认拒绝），前端一键批复；图片生成天然带确认卡。
+- **多供应商 profiles**：UI 管理多套模型配置，改档免重启热切换，密钥不出本机、绝不入日志/事件。
+- **workspace 自托管**：店铺档案 / 知识库 / 技能落在 `~/.vibe-seller/`，git 自动提交历史，文件级版本与回滚。
+- **工程纪律内置**：`npm run verify` 四门禁（类型 / 测试 / 构建 / diff 范围）+ commit-msg 格式门禁 + pre-commit 密钥扫描（七模式 + 可审查 allowlist）。
+
+## 快速开始（Windows）
+
+**双击 `start.bat`** —— 自动完成环境检查 → 首次 `npm install` → 新窗口启动服务 → 等就绪 → 打开浏览器。
+
+默认账号 `admin / admin`，**首次登录后请到设置页修改密码**。
+
+手动等价命令（任意平台，Node ≥ 22.5）：
+
+```bash
+npm install
+npm start          # 开发形态：esbuild 临时 bundle + 进程内启动，Ctrl+C 停止
+# 浏览器打开 http://127.0.0.1:7777/
+```
+
+### 配置模型（必需）
+
+任选其一：
+
+1. **UI**：设置 → AI → 模型 profiles，新增 profile，填 Anthropic 兼容端点 + 模型 id + API key；
+2. **文件**：编辑 `~/.vibe-seller/profiles.json`（热生效，免重启）：
+
+```json
+{
+  "profiles": {
+    "my-model": {
+      "name": "My Model",
+      "description": "",
+      "load_global_mcp": false,
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://<你的兼容端点>/anthropic",
+        "ANTHROPIC_MODEL": "<模型 id>",
+        "ANTHROPIC_AUTH_TOKEN": "<你的 API key>"
+      }
+    }
+  }
+}
+```
+
+> 只支持 Anthropic Messages 兼容端点（OpenAI 原生 chat/completions 形状不支持）。key 按原版设计明文存于该文件，请自行保证磁盘安全。
+
+## 浏览器工具（操作店铺页面）
+
+给店铺建档（chrome 后端）→ 启动店浏览器 → 在弹出的 Chrome 窗口里**登录一次**卖家中心（登录态持久保存）→ 建任务让 agent 操作；店铺无关的通用网页用 `session: "web"`。
+
+已知边界：**紫鸟（ziniao）后端的店铺暂不支持 agent 驱动**（返回结构化错误，绝不拉起无登录态的替代浏览器）；同店并发任务共享浏览器；每店 profile 只隔离 cookie，不隔离浏览器指纹与出口 IP——多账号隔离需求请自行评估关联风险。
+
+## 分发与升级
+
+```bash
+npm run package                      # 产出 release/vibe-seller-ts/（捆绑 Node 运行时 + 前端，目标机无需装 Node）
+release\vibe-seller-ts\start.bat     # 分发形态一键启动
+npm run smoke:package                # 打包冒烟：全新安装 + Python→TS 原地升级两场景 23 断言
+```
+
+`~/.vibe-seller/` 数据目录跨版本**原地升级双向兼容**——含从 Python 原版直接升级：老用户 bcrypt 哈希可登录、店铺数据 / 加密凭据（Fernet 跨语言互操作）/ install_id 原样接管，详见 `docs/deploy.md`。
+
+## 开发者指南
+
+```bash
+npm install                                  # workspaces：core + runtime + adapters-pi + bridge + server
+npm test                                     # 全量测试（单测 + 集成；真实 provider/浏览器冒烟按需跳过）
+npm run typecheck                            # tsc 严格模式全仓检查
+npm run verify -- --scope <任务范围> --base <回滚点>   # 四门禁一键：类型→测试→构建→diff 范围
+npm run hooks:install                        # 启用 commit-msg 格式门禁 + pre-commit 密钥扫描（克隆后执行一次）
+npm run e2e                                  # 前端零改动 e2e（系统 Chrome；本仓 vendor 的前端 dist）
+npm run vendor:check                         # 前端 vendor 清单校验（必须与参考仓库字节级一致）
+```
+
+提交遵循 Conventional Commits（`feat|fix|docs|chore|refactor|test|perf|build|ci|style|revert: 描述`，commit-msg hook 机审）；**禁止 `git commit --no-verify`**。开发流程（PRD → TDD → 双重审查 → 四门禁交付）见 `AGENTS.md` 与 `docs/workflow.md`。
 
 ## 结构
 
@@ -14,69 +91,38 @@ Task → Context → 模型决策 → 工具动作 → 观察 → 状态推进 �
 packages/
   core/        @vibe/core        纯领域契约 + 确定性循环。零 SDK 依赖、零副作用、可独立测试。
   runtime/     @vibe/runtime     执行托管：Session/Run、产品级事件流、JSONL RunLog（唯一事实源）、
-                                 预算/超时/取消、awaiting_human → resume 回放续跑、usage 上报、
-                                 引擎接缝（RunEngine：Core 引擎 ↔ Pi 引擎可替换）。
-  adapters-pi  @vibe/adapters-pi Pi SDK 适配器：SDK 拥有循环（createAgentSession），
-                                 事件归一化为产品级事件流；ToolPort ↔ defineTool 桥；
-                                 DoD rubric 评审 + 任务后反思 + SKILL.md 加载器。
-  bridge/      @vibe/bridge      server 进程内复用的 agent 装配面（Phase 5.2 起）：事件翻译
-                                 （translator，event_bus 逐字段词汇表）、多供应商 profiles
-                                 解析、pi 引擎装配（readEnv/buildPi/闸门/工具 schema 映射）。
-                                 原 Python↔TS 绞杀桥（HTTP+SSE 服务/scripted 引擎/MCP
-                                 客户端）已随 Phase 5 退役，见 docs/bridge-protocol.md。
-  server/      @vibe/server      TS Web 后端（Phase 4）：Hono + node:sqlite 与原库原地共存；
-                                 JWT/cookie/bcrypt 与 Python 侧逐字节兼容；SSE 总线契约一致；
-                                 批次 4.1 起逐步点亮；4.5 后含 workspace（git 自托管知识库
-                                 + skills + CATALOG 桩契约 + knowledge/skills 远端同步）、
-                                 profiles（原格式 profiles.json + 保存探针 + 引擎双源派生）
-                                 与 workspace assistant（SSE 会话）；4.6 后含外围面：
-                                 email（Fernet 跨语言互操作 + 自研最小 IMAP/SMTP + per-account
-                                 SQLite + 水位游标）、channels/wecom（打码 + 路径白名单）、
-                                 events（状态机 + 事件抽取/同步）、dida365 OAuth、
-                                 ziniao/browser（本地 HTTP 请求面 + 外部进程托管）、
-                                 vision（确认闸门 + kie.ai + ref-proxy SSRF 防护）。
-                                 5.1 起 agent 工具面 = 22 工具进程内原生 ToolPort；
-                                 5.2 起原生引擎装配并入 server 进程（@vibe/bridge 残留面）。
-docs/
-  migration-plan.md             五阶段迁移路线与状态、等价性红线、架构决定
-  adapter-mapping-note.md       Port ↔ Pi SDK 映射笔记（已装机核实 v0.84.2）
-  bridge-protocol.md            桥协议 v1（已随 Phase 5 退役）：端点、事件映射、已裁决语义
-  phase4-backend-inventory.md   原后端表面积盘点（179 端点/19 表/26 SSE 事件）与 Phase 4 批次计划
+                                 预算/超时/取消、awaiting_human → resume 回放续跑、usage 上报。
+  adapters-pi  @vibe/adapters-pi Pi SDK 适配器：SDK 拥有循环，事件归一化为产品级事件流；
+                                 ToolPort ↔ defineTool 桥；确认闸门；DoD 评审 + 任务后反思。
+  bridge/      @vibe/bridge      server 进程内复用的 agent 装配面：事件翻译（event_bus 逐字段
+                                 词汇表）、多供应商 profiles 解析、pi 引擎装配。
+  server/      @vibe/server      TS Web 后端：Hono + node:sqlite，179 端点 / 26 SSE 事件；
+                                 workspace（git 自托管）、profiles、email、channels/wecom、
+                                 events、dida365、ziniao/browser、vision、27 原生工具面、
+                                 浏览器层（BrowserStarter + 裸 CDP 连接层 + browse 五工具）。
+frontend/                     原版 React 19 前端（181 文件 sha256 字节级 vendor，零改动红线）
+scripts/                      构建/打包/冒烟/宪法门禁（verify、check-scope）/git hooks
+docs/                         宪法、工作流、路线图、各期 PRD、审查记录
 ```
 
-关键不变量（全部有测试锁定）：
+关键不变量（全部有测试锁定）：事件日志是 run 的唯一事实源（先落盘再推消费者，回放幂等）；取消/超时/失败绝不伪造完成；预算由 Runtime 与循环共同执行，同意图连续 3 次失败判 `no_progress` 止损；`run_completed` 区分 `complete`/`partial`（partial 必须点名 missingMaterial）；密钥绝不入事件/日志/RunLog/SSE 帧。
 
-- 事件日志是 run 的唯一事实源：先落盘再推消费者；回放重建 AgentState 幂等；
-- 取消/超时/失败绝不伪造完成：`run_cancelled` / `run_failed(budget_timeout)` 可区分归因；
-- 预算（迭代/工具/重试/超时）由 Runtime 与循环共同执行；同一意图连续失败 3 次判 `no_progress` 空转止损；
-- `run_completed` 区分 `complete` / `partial`（partial 必须点名 missingMaterial）；
-- 两个 Session 互不共享消息、状态与观察；
-- 桥上密钥只走 `VIBE_BRIDGE_API_KEY` 环境变量，绝不入事件/日志/RunLog/SSE 帧。
+## 与原版（Python）的关系
 
-## 命令
+绞杀者模式逐模块迁移已完成：REST/SSE 契约与原版**录制级对账**（真 FastAPI 录制 157 步流量回放 + 篡改变红）、工具 schema 与原实现 ast 抽取逐字节对账、前端 sha256 字节级一致、数据目录原地升级互认。有意边界：原版的紫鸟 / browser-use 浏览器链未迁入（"浏览器层外部进程托管"架构裁决），TS 以原生浏览器工具覆盖 chrome 后端 + web 会话场景。详见 `docs/migration-plan.md` 与 `docs/route2-browser-tools-prd.md`。
 
-```bash
-npm install          # workspaces：core + runtime + adapters-pi + bridge + server
-npm start            # 本机开发启动 TS server（scripts/dev-start.mjs：esbuild 临时 bundle）
-npm test             # vitest run
-npm run typecheck    # tsc 严格模式全仓检查
-npm run e2e          # 前端零改动 e2e（需系统 Chrome；本仓 vendor 的前端 dist）
-npm run package      # 分发打包：vendor 校验 → 前端构建 → server bundle → release/ 组装
-npm run smoke:package  # 打包冒烟：全新安装 + Python→TS 原地升级两场景（升级场景需参考仓库 venv）
-npm run vendor:check # 前端 vendor 清单校验（frontend/ 必须与参考仓库字节级一致）
-```
+## 文档
 
-> Python 编排路径（`python/ts_agent_backend.py` 跨语言契约测试、`npm run bridge:build`、
-> fixture 录制器）已随 Phase 5.2 退役；录制回放 fixture 已入库，回放测试零 Python 依赖。
-> 产品分发形态见 `docs/deploy.md`（捆绑 Node 运行时 + server.mjs + 前端 dist，支持从
-> Python 版原地升级）。
-
-## 金标回放
-
-`packages/runtime/test/golden.test.ts` 用 noon FBN 报表任务（list_reports → download_report → respond）
-钉死了 15 条产品级事件的完整 transcript（确定性时钟 + ID）。以后接真实 Pi SDK 适配器时，
-fake 与 real 通道必须回放出**同一条** transcript，SDK 升级才不致悄悄改变语义。
+| 文档 | 内容 |
+|---|---|
+| [AGENTS.md](AGENTS.md) | AI 编码代理入口手册（架构速览 / 纪律 / Golden Path） |
+| [docs/constitution.md](docs/constitution.md) | 项目宪法（强制工程原则 + 机器门禁落地表） |
+| [docs/workflow.md](docs/workflow.md) | 9 阶段标准开发工作流 |
+| [docs/roadmap.md](docs/roadmap.md) | 路线图与各路线状态（真实任务验收 / 浏览器工具 / 门禁建设 / 台账清理） |
+| [docs/deploy.md](docs/deploy.md) | 安装 / 升级 / 回退 |
+| [docs/migration-plan.md](docs/migration-plan.md) | 五阶段迁移路线、等价性红线、架构决定 |
+| [docs/审查记录.md](docs/审查记录.md) | 每任务双重审查结论与遗留台账 |
 
 ## 状态
 
-Phase 1–3 完成（内核/技能闸门/编排绞杀桥：TsAgentBackend + MCP 工具面 + plan 模式 + 多供应商 profiles）。**Phase 4 批次 4.1–4.7 全部完成**（批次 4.1–4.6 摘要见 git 历史与 `docs/migration-plan.md`；`@vibe/server` = Hono + node:sqlite 与原库原地共存，179 端点全点亮，JWT/bcrypt/Fernet 与 Python 逐字节兼容，SSE 总线契约一致，调度/workspace/profiles/email/channels/events/vision/ziniao 全家面齐）。**批次 4.7（验收）**：telemetry 模块移植（PostHog 最小 fetch 传输 + 四重门控 + ~20 事件面接线，零新运行时依赖）；**录制流量回放契约测试**——真 FastAPI（参考仓库 venv 进程内）录制 157 步 fixture 入库，TS 回放逐请求比对（零 Python 依赖、归一化 10 规则、时区钉死、篡改变红验证），对证修正 19 处 TS 契约偏差；**前端零改动 e2e**——`npm run e2e` 用 Playwright + 系统 Chrome 驱动原 React 19 构建产物（sha256 零改动）跑 TS server 关键流 5 用例。双重审查（独立规格审查 + 代码质量审查）后整改收口。测试：TS 322 通过 + 2 真实冒烟按需跳过；e2e 5 通过。**Phase 5 完成（Python 退役）**：批次 5.1——原生 ToolPort（22 工具进程内 app.request 自调替换每 run 拉起的 Python MCP 子进程；服务令牌/能力门/send_email 两段式/sanitize_json/错误包装逐语义对齐原实现）；批次 5.2——退役清理（`python/` 适配器与跨语言测试、桥 HTTP+SSE 服务/scripted 引擎/MCP 客户端/`bridge:build` 删除，translator/profiles/引擎装配并入 server 进程内）+ 原地升级补列（`_ensure_added_columns` 14 条全量 + 既有 2 条 = 16 列 + `_backfill_finalize_enabled_at` finalize 存量武装）+ `npm start` + 优雅关闭；批次 5.3——vendor 前端 181 文件字节级进仓（三道哈希门禁）、esbuild 单文件 bundle、`npm run package` 组装 release（捆绑 node.exe + start/stop.bat）、**Python→TS 原地升级冒烟 23 断言全绿**（老 bcrypt 用户直接登录、数据/install_id 原样）、`docs/deploy.md`。审查整改：服务默认绑定 127.0.0.1（BACKEND_HOST 可覆盖）、stop.bat 防 pid 复用误杀、SSE 存续停机不挂死。测试：TS 357 通过 + 2 真实冒烟按需跳过；e2e 5/5；打包冒烟 23/23。**迁移至此全部完成**：产品运行时 = 捆绑 Node + server.mjs + 前端 dist，`~/.vibe-seller` 数据目录原地升级双向兼容；切流验收用户已裁决跳过。
+迁移与后续建设全部完成：Phase 1–5（内核 / 闸门 / 编排 / Web 后端 / Python 退役）+ 路线 1 真实任务验收（真实模型 × 工具 × 闸门 × workspace 闭环）+ 路线 2 浏览器工具（27 工具面）+ 路线 3 宪法四门禁（verify / check-scope / commit-msg / secret 扫描）。测试 568+ 通过；打包冒烟 23/23；e2e 5/5。运行时 = 捆绑 Node + server.mjs + 前端 dist，`~/.vibe-seller` 原地升级双向兼容。后续方向见 `docs/roadmap.md`。
