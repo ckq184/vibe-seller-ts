@@ -105,7 +105,7 @@ describe("stores 契约", () => {
     expect(zProxy.status).toBe(200);
   });
 
-  it("share_group 方案A：chrome 建店缺省入组 main（显式空串=独立店，ziniao 恒不入组）；PUT 缺 share_group 键=保留现值（防 vendor 表单整包回传误退组）", async () => {
+  it("share_group 方案A（建店侧）：chrome 建店缺省入组 main（显式空串=独立店，ziniao 恒不入组）", async () => {
     // chrome 无 browser_config → 默认 main
     const a = (await (await post("/api/stores", { name: "AutoGroup" })).json()) as { browser_config: Record<string, unknown> };
     expect(a.browser_config).toEqual({ share_group: "main" });
@@ -120,11 +120,14 @@ describe("stores 契约", () => {
     // ziniao 恒不入组
     const z = (await (await post("/api/stores", { name: "ZnNoGroup", browser_backend: "ziniao" })).json()) as { browser_config: Record<string, unknown> };
     expect(z.browser_config).toEqual({});
-    // PUT：body 缺 share_group 键 → 保留现值，其余键整包替换
+  });
+
+  it("share_group 方案A（改店侧）：PUT 缺 share_group 键=保留现值（防 vendor 表单整包回传误退组）；显式空串=退组；不带 browser_config=不动", async () => {
     const d = (await (await post("/api/stores", { name: "KeepGroup" })).json()) as { id: string };
+    // body 缺 share_group 键 → 保留现值，其余键整包替换
     const kept = await put(`/api/stores/${d.id}`, { browser_config: { proxy_server: "http://p:1" } });
     expect(((await kept.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ proxy_server: "http://p:1", share_group: "main" });
-    // PUT：显式空串 = 退组；完全不带 browser_config = 不动
+    // 显式空串 = 退组；完全不带 browser_config = 不动
     const leave = await put(`/api/stores/${d.id}`, { browser_config: { share_group: "" } });
     expect(((await leave.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ share_group: "" });
     const untouched = await put(`/api/stores/${d.id}`, { platforms: ["shopee"] });
