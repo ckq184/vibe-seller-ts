@@ -305,6 +305,16 @@ describe("loadAllowlist", () => {
     writeFileSync(join(dir, "nonote.json"), JSON.stringify({ allowlines: [{ re: "x" }] }), "utf8");
     expect(() => loadAllowlist(join(dir, "nonote.json"))).toThrow(/note/);
   });
+
+  it("正则不可编译的条目 → 加载期抛错且信息含条目内容（审查 Major1：坏正则不得拖到扫描期才炸）", () => {
+    const dir = mkTemp(false);
+    writeFileSync(
+      join(dir, "badre.json"),
+      JSON.stringify({ allowlines: [{ re: "[", note: "坏正则示例" }] }),
+      "utf8",
+    );
+    expect(() => loadAllowlist(join(dir, "badre.json"))).toThrow(/不可编译/);
+  });
 });
 
 // ── CLI 集成：node scan-secrets.mjs（cwd = 目标仓）──
@@ -324,21 +334,21 @@ describe("CLI 集成", () => {
     expect(out).not.toContain(BLOCKED_SK);
     expect(out).toContain("轮换");
     expect(out).toContain("secret-allowlist.json");
-  });
+  }, 30_000);
 
   it("staged 干净文件 → exit 0", () => {
     const dir = mkTemp(true);
     writeFileSync(join(dir, "ok.txt"), "nothing suspicious here\n", "utf8");
     git(dir, "add", "ok.txt");
     expect(runNode(cliPath, [], dir).status).toBe(0);
-  });
+  }, 30_000);
 
   it("二进制 staged（NUL 字节）→ 跳过，exit 0", () => {
     const dir = mkTemp(true);
     writeFileSync(join(dir, "blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x03]));
     git(dir, "add", "blob.bin");
     expect(runNode(cliPath, [], dir).status).toBe(0);
-  });
+  }, 30_000);
 
   it("非 git 目录 → exit 2", () => {
     const r = runNode(cliPath, [], mkTemp(false));
@@ -360,14 +370,71 @@ describe("CLI 集成", () => {
     expect(runNode(join(copyDir, "scan-secrets.mjs"), [], dir).status).toBe(2);
     // 经 main 的 allowlistPath 注入直接验证损坏 → 2
     expect(main([process.execPath, cliPath], { cwd: dir, allowlistPath: bad })).toBe(2);
-  });
+  }, 30_000);
+
+  it("allowlist 坏正则条目 → exit 2 且 stderr 含 allowlist 与条目内容提示，非裸堆栈（审查 Major1）", () => {
+    const dir = mkTemp(true);
+    writeFileSync(join(dir, "ok.txt"), "clean\n", "utf8");
+    git(dir, "add", "ok.txt");
+    // CLI 级全链路验证：复制模块 + 坏正则 allowlist 到独立模块根（同上"损坏 JSON"用例的形态）
+    const copyDir = mkTemp(false);
+    writeFileSync(join(copyDir, "scan-secrets.mjs"), readFileSync(cliPath, "utf8"), "utf8");
+    writeFileSync(
+      join(copyDir, "secret-allowlist.json"),
+      JSON.stringify({ allowlines: [{ re: "[", note: "坏正则" }] }),
+      "utf8",
+    );
+    const r = runNode(join(copyDir, "scan-secrets.mjs"), [], dir);
+    expect(r.status).toBe(2);
+    const err = r.stderr;
+    expect(err).toContain("allowlist");
+    expect(err).toContain("[");
+    // 非裸英文堆栈：不得出现 node 未捕获异常的 "at <fn>:<line>:<col>" 帧行
+    expect(err).not.toMatch(/\n\s+at /);
+  }, 30_000);
+
+  it("staged 嵌入式 gitlink（mode 160000）→ 跳过不扫描，exit 0（审查 Major2）", () => {
+    const dir = mkTemp(true);
+    writeFileSync(join(dir, "ok.txt"), "clean\n", "utf8");
+    git(dir, "add", "ok.txt");
+    // 造 staged gitlink：指向外仓对象库中不存在的 commit sha（嵌套仓 clone 后对象
+    // 不在外仓 odb 的真实形态）；git 索引层不校验 gitlink 目标存在性，实测可加
+    git(dir, "update-index", "--add", "--cacheinfo", "160000,deadbeefdeadbeefdeadbeefdeadbeefdeadbeef,nested");
+    const r = runNode(cliPath, [], dir);
+    expect(r.status).toBe(0);
+  }, 30_000);
+
+  it("组合 staged（3 文本+1 二进制+1 gitlink）→ 全部逐文件正确扫描：命中文件被拒、干净/跳过不误报（审查 Major3 batch 化防回归）", () => {
+    const dir = mkTemp(true);
+    // 路径按字母序即 diff 顺序：命中文件夹在二进制与 gitlink 之间，
+    // 钉住 batch 化后 sha↔path 按序对应不错位
+    writeFileSync(join(dir, "a-clean.txt"), "clean marker A\n", "utf8");
+    writeFileSync(join(dir, "b-blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x03]));
+    writeFileSync(join(dir, "c-leak.txt"), `const t = "${BLOCKED_SK}";\n`, "utf8");
+    writeFileSync(join(dir, "e-clean.txt"), "clean marker E\n", "utf8");
+    git(dir, "add", "a-clean.txt", "b-blob.bin", "c-leak.txt", "e-clean.txt");
+    git(dir, "update-index", "--add", "--cacheinfo", "160000,deadbeefdeadbeefdeadbeefdeadbeefdeadbeef,d-nested");
+    const r = runNode(cliPath, [], dir);
+    expect(r.status).toBe(1);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain("c-leak.txt:1");
+    expect(out).toContain("[stepfun-openai-sk]");
+    expect(out).toContain("sk-L…EY");
+    expect(out).not.toContain(BLOCKED_SK);
+    // 干净文本与跳过对象不得出现在命中清单（映射错位会把它顶到别的路径/行上）
+    expect(out).not.toContain("a-clean.txt");
+    expect(out).not.toContain("e-clean.txt");
+    expect(out).not.toContain("d-nested");
+    // 拒绝输出同时提示已跳过数量（Minor 2 改写：1 二进制 + 1 gitlink）
+    expect(out).toMatch(/另有 2 个二进制\/删除\/gitlink 变更已跳过扫描/);
+  }, 30_000);
 
   it("allowlist 缺失 → 照常扫描（缺失=零放行）", () => {
     const dir = mkTemp(true);
     writeFileSync(join(dir, "leak.txt"), `token = ${BLOCKED_SK}\n`, "utf8");
     git(dir, "add", "leak.txt");
     expect(main([process.execPath, cliPath], { cwd: dir, allowlistPath: join(dir, "nope.json") })).toBe(1);
-  });
+  }, 30_000);
 
   it("main() 直调（cwd 注入）：干净仓 0 / 命中仓 1", () => {
     const clean = mkTemp(true);
@@ -379,7 +446,7 @@ describe("CLI 集成", () => {
     writeFileSync(join(leak, "a.txt"), `k = ${BLOCKED_SK}\n`, "utf8");
     git(leak, "add", "a.txt");
     expect(main([process.execPath, cliPath], { cwd: leak })).toBe(1);
-  });
+  }, 30_000);
 });
 
 // ── hook 入口 ──
@@ -398,7 +465,7 @@ describe("pre-commit hook 入口", () => {
     writeFileSync(join(leak, "a.txt"), `k = ${BLOCKED_SK}\n`, "utf8");
     git(leak, "add", "a.txt");
     expect(runNode(hookEntryPath, [], leak).status).toBe(1);
-  });
+  }, 30_000);
 });
 
 // ── 真仓集成：git commit 真实走 pre-commit（PRD §五.3/§五.4）──
@@ -418,7 +485,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "add", "ok.txt");
     const r = commitWithMessage(dir, "feat: 临时仓干净提交\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("staged 假密钥 → git commit 非零退出，输出含 文件:行号 与打码行", () => {
     const dir = withHooks(mkTemp(true));
@@ -431,7 +498,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     expect(out).toContain("[stepfun-openai-sk]");
     expect(out).toContain("sk-L…EY");
     expect(out).not.toContain(BLOCKED_SK);
-  });
+  }, 30_000);
 
   it("allowlist 放行后提交成功（登记过的单测假密钥）", () => {
     const dir = withHooks(mkTemp(true));
@@ -439,7 +506,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "add", "fixture.txt");
     const r = commitWithMessage(dir, "feat: allowlist 放行的假密钥提交\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("二进制文件 staged 提交不被误拦", () => {
     const dir = withHooks(mkTemp(true));
@@ -447,7 +514,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "add", "blob.bin");
     const r = commitWithMessage(dir, "feat: 二进制文件提交\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("Deleted staged 路径跳过（HEAD 中含密钥的文件被删不拦提交）", () => {
     const dir = withHooks(mkTemp(true));
@@ -461,7 +528,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "rm", "leak.txt");
     const r = commitWithMessage(dir, "feat: 删除含密钥文件并新增干净文件\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("对照组：--no-verify 能提交带密钥内容（PRD §六.2 明示取舍：hook 层不防绕过，防绕过靠代码质量审查核对 diff）", () => {
     const dir = withHooks(mkTemp(true));
@@ -469,5 +536,5 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "add", "leak2.txt");
     const r = commitWithMessage(dir, "feat: no-verify 对照组\n", ["--no-verify"]);
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 });

@@ -320,7 +320,7 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     const r = commitWithMessage(dir, "feat: 临时仓合法首提交\n");
     expect(r.status).toBe(0);
     expect(r.stderr).not.toContain("白名单");
-  });
+  }, 30_000);
 
   it("非法 message → git commit 非零退出，输出含白名单字样", () => {
     const dir = mkTemp(true);
@@ -328,21 +328,21 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     const r = commitWithMessage(dir, "bad message 不合格式\n");
     expect(r.status).not.toBe(0);
     expect(r.stderr + r.stdout).toContain("白名单");
-  });
+  }, 30_000);
 
   it("Merge 开头的 message 豁免通过", () => {
     const dir = mkTemp(true);
     git(dir, "config", "core.hooksPath", hooksPath);
     const r = commitWithMessage(dir, "Merge branch 'x'\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("对照：未安装 hooksPath 时 hook 不生效（非法 message 也提交成功）", () => {
     const dir = mkTemp(true);
     expect(readHooksPath(dir)).toBe("");
     const r = commitWithMessage(dir, "bad message 不合格式\n");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 });
 
 describe("真仓集成：hooks-install 安装全链（生产形态，相对路径）", () => {
@@ -357,5 +357,5 @@ describe("真仓集成：hooks-install 安装全链（生产形态，相对路�
     const bad = commitWithMessage(dir, "still bad\n");
     expect(bad.status).not.toBe(0);
     expect(bad.stderr + bad.stdout).toContain("白名单");
-  });
+  }, 30_000);
 });

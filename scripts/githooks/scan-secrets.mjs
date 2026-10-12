@@ -8,9 +8,11 @@
 // 自写扫描覆盖面窄但确定性强、完全 TDD 可钉、离线可用）。
 //
 // 规格锚点（PRD §四）：
-//   - 扫描对象：staged Added/Modified（Deleted 跳过——staged 内容已不存在，
-//     `git show :path` 无从读取；二进制跳过——numstat 两列为 "-" 或 UTF-8 解码含
-//     NUL/替换符）。只看 staged，不扫 unstaged/未跟踪（PRD §六.5）。
+//   - 扫描对象：staged Added/Modified（`git diff --cached --raw -z` 取 status/mode/
+//     blob sha；Deleted 跳过——索引里已无内容；gitlink（mode 160000，嵌入式仓指针）
+//     跳过——不是文本对象；二进制跳过——numstat "-" 或内容含 NUL/替换符）。
+//     内容经一次 `git cat-file --batch` 读取（spawn 次数与文件数无关）。只看 staged，
+//     不扫 unstaged/未跟踪（PRD §六.5）。
 //   - 模式表：PATTERNS 七条，逐条注释说明针对的密钥形状；显式模式、无高熵启发式
 //     （PRD §六.6：误报面不可控）。诚实边界 = "已知模式 + 可审查 allowlist"。
 //   - 打码：命中串只留前 4 后 2 字符 + "…"（如 68kV…hAh），短于 8 位全打码；
@@ -152,6 +154,11 @@ export function loadAllowlist(file) {
     if (typeof entry.note !== "string" || !entry.note) {
       throw new Error(`secret-allowlist.json 条目非法（${entry.re}）：缺少 note 字段（每条必须写明为什么放行，PRD §四）`);
     }
+    try {
+      new RegExp(entry.re); // 加载期编译验证：坏正则在扫描期才炸会拖死之后每一次提交（审查 Major1）
+    } catch (err) {
+      throw new Error(`secret-allowlist.json 条目正则不可编译（${entry.re}）：${err.message}`);
+    }
   }
   return parsed.allowlines;
 }
@@ -162,6 +169,33 @@ function gitRun(args, cwd, encoding) {
     encoding,
     maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+// 一次 spawn 读全部 staged blob（git cat-file --batch，stdin 逐行喂 sha，按帧
+// `<sha> blob <len>\n<content>\n` 解析——审查 Major3：逐文件 git show 的进程创建开销
+// ~85ms/文件，121 文件即 10s 级 pre-commit；batch 化后 spawn 次数与文件数无关）。
+// 对象缺失（理论不可达：sha 来自 --raw 自身）fail-closed 报错。
+function batchReadBlobs(shas, cwd) {
+  if (shas.length === 0) return { contents: [] };
+  const input = shas.map((s) => s + "\n").join("");
+  const r = spawnSync("git", ["cat-file", "--batch"], { cwd, input, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status !== 0) {
+    return { error: r.stderr?.toString() || r.error?.message || `exit=${r.status}` };
+  }
+  const out = r.stdout;
+  const contents = [];
+  let pos = 0;
+  for (let i = 0; i < shas.length; i++) {
+    const nl = out.indexOf(0x0a, pos);
+    if (nl < 0) return { error: `git cat-file --batch 输出截断（第 ${i + 1} 帧无头部换行）` };
+    const header = out.slice(pos, nl).toString("utf8");
+    pos = nl + 1;
+    if (!/ \d+$/.test(header)) return { error: `staged 对象读取失败：${header}` }; // "<sha> missing" 形态
+    const len = Number(header.slice(header.lastIndexOf(" ") + 1));
+    contents.push(out.slice(pos, pos + len));
+    pos += len + 1; // 帧尾换行
+  }
+  return { contents };
 }
 
 // CLI/共享入口。argv 仅作形态兼容（与 commit-msg.mjs 的 main 同形，argv[2] 未用）。
@@ -181,16 +215,16 @@ export function main(argv, { cwd = process.cwd(), allowlistPath } = {}) {
     return 2;
   }
 
-  // staged 清单：name-status 取 Added/Modified/Typechanged，Deleted 跳过
-  // （staged 删除后索引里已无该路径，内容无从读取也无须读取）。
-  // --no-renames：把重命名拆成 D+A，状态/路径一一对应，免解析 R 带分数的 -z 形状。
-  const ns = gitRun(["diff", "--cached", "--name-status", "--no-renames", "-z"], cwd, "utf8");
-  if (ns.error || ns.status !== 0) {
-    console.error(`[pre-commit secret 扫描] 运行错误：git diff --cached 失败：${ns.stderr || ns.error?.message || `exit=${ns.status}`}（cwd=${cwd}，须在 git 仓库内执行）`);
+  // staged 清单：--raw -z 一次拿 status/mode/sha/path（--no-renames 拆 D+A 免解析
+  // R 带分数的 -z 形状）。Deleted 跳过（索引里已无内容）；gitlink（dstMode 160000，
+  // 嵌入式仓指针）跳过——`git show :path` 对其报 bad object（审查 Major2）。
+  const raw = gitRun(["diff", "--cached", "--raw", "--no-renames", "-z"], cwd, "utf8");
+  if (raw.error || raw.status !== 0) {
+    console.error(`[pre-commit secret 扫描] 运行错误：git diff --cached 失败：${raw.stderr || raw.error?.message || `exit=${raw.status}`}（cwd=${cwd}，须在 git 仓库内执行）`);
     return 2;
   }
 
-  // 二进制清单：numstat 两列含 "-" 即二进制（PRD §四第一道防线）
+  // 二进制清单：numstat 两列含 "-" 即二进制（第一道防线；looksBinary 为内容级第二道）
   const numstat = new Map(); // path → isBinary
   const nm = gitRun(["diff", "--cached", "--numstat", "--no-renames", "-z"], cwd, "utf8");
   if (!nm.error && nm.status === 0) {
@@ -203,37 +237,52 @@ export function main(argv, { cwd = process.cwd(), allowlistPath } = {}) {
   }
 
   const entries = [];
-  const nsParts = ns.stdout.split("\0");
-  for (let i = 0; i + 1 < nsParts.length; i += 2) {
-    entries.push({ status: nsParts[i], path: nsParts[i + 1] });
+  const rawParts = raw.stdout.split("\0");
+  for (let i = 0; i + 1 < rawParts.length; i += 2) {
+    // meta 形如 ":100644 100644 <srcSha> <dstSha> M"
+    const meta = rawParts[i].replace(/^:/, "").split(" ");
+    entries.push({ dstMode: meta[1], dstSha: meta[3], status: meta[4]?.[0] ?? "", path: rawParts[i + 1] });
   }
 
-  const findings = [];
-  let scanned = 0;
+  const toScan = []; // {path, sha}
   let skippedBinary = 0;
   let skippedDeleted = 0;
+  let skippedGitlink = 0;
 
-  for (const { status, path } of entries) {
+  for (const { dstMode, dstSha, status, path } of entries) {
     if (status === "D") {
       skippedDeleted++;
+      continue;
+    }
+    if (dstMode === "160000") {
+      skippedGitlink++;
       continue;
     }
     if (numstat.get(path) === true) {
       skippedBinary++;
       continue;
     }
-    // 逐文件读 staged 内容（git show :path = 索引版本，不读工作区——被 staged 的才是要提交的）
-    const show = gitRun(["show", `:${path}`], cwd, "buffer");
-    if (show.error || show.status !== 0) {
-      console.error(`[pre-commit secret 扫描] 运行错误：无法读取 staged 内容 :${path}：${show.stderr || show.error?.message || `exit=${show.status}`}`);
-      return 2;
-    }
-    if (looksBinary(show.stdout)) {
+    toScan.push({ path, sha: dstSha });
+  }
+
+  // 一次 batch 读全部 staged blob（staged 内容 = 索引版本，不读工作区）
+  const batch = batchReadBlobs(toScan.map((e) => e.sha), cwd);
+  if (batch.error) {
+    console.error(`[pre-commit secret 扫描] 运行错误：读取 staged 内容失败：${batch.error}`);
+    return 2;
+  }
+
+  const findings = [];
+  let scanned = 0;
+  for (let i = 0; i < toScan.length; i++) {
+    const { path } = toScan[i];
+    const buf = batch.contents[i];
+    if (looksBinary(buf)) {
       skippedBinary++;
       continue;
     }
     scanned++;
-    for (const f of scanText(show.stdout.toString("utf8"), allowlines)) {
+    for (const f of scanText(buf.toString("utf8"), allowlines)) {
       findings.push({ file: path, ...f });
     }
   }
@@ -252,8 +301,9 @@ export function main(argv, { cwd = process.cwd(), allowlistPath } = {}) {
   console.error(`  2. 若该密钥已真实泄漏，先轮换（revoke + 重新签发）再清理内容；`);
   console.error(`  3. 确属合法假密钥/文档示例（如测试 fixture）：在 scripts/githooks/secret-allowlist.json`);
   console.error(`     增加 {re, note} 条目（note 写明出处，入仓可审查），审查后再提交。`);
-  if (scanned === 0 && (skippedBinary > 0 || skippedDeleted > 0)) {
-    console.error(`  （本次 staged 变更全部为二进制或删除，已跳过）`);
+  const skippedTotal = skippedBinary + skippedDeleted + skippedGitlink;
+  if (skippedTotal > 0) {
+    console.error(`  （另有 ${skippedTotal} 个二进制/删除/gitlink 变更已跳过扫描）`);
   }
   return 1;
 }
