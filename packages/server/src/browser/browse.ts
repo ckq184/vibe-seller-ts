@@ -8,10 +8,16 @@
 //（cdp.ts），调用纪律层本文件任何失败一律 throw 交由上层转 error status，绝不原地重发。
 // 安全面：连接 URL/端口只来自 starter（服务端），工具参数面没有它们；不加 URL 白名单
 //（PRD §七.8），仅保留 scheme 守卫（§5.2：file://、chrome:// 不进导航）。
+// 共享浏览器组（2026-10-12）：share_group 入组店共用一个 Chrome——连接 key（三张连接
+// Map）= `shared:<组>`（一条 ws，CDP 按 sessionId 多路复用），tab 态 key =
+// `shared:<组>::<store_id>` 且启用**标签所有权**：本店只能看到/切换/关闭/回收自己开出
+// 的 tab（不收养他店 tab、LRU 上限只数自己、显式 tab_id 越权一律"not found"）——tab 级
+// 防串店（cookie 级共享是方案甲的明示取舍，见 PRD 修订记录）。非共享店语义逐字不变。
 // 零新依赖（宪法第 4 条）：CDP 走内建 CdpConnection（Node 全局 WebSocket + fetch）。
 
 import type { DatabaseSync } from "node:sqlite";
 import { CdpConnection, type CdpConnectionDeps, type CdpTargetInfo } from "./cdp";
+import { SHARED_KEY_PREFIX, storeSessionIdentity } from "./starter";
 
 // ── 公开面 ──
 
@@ -32,7 +38,7 @@ function isBrowseToolName(name: string): name is BrowseToolName {
 
 /** starter 的最小结构面（生产传 BrowserStarter；测试注假 starter）。 */
 export interface BrowseStarterPort {
-  ensureStoreChrome(store: { id: string; name: string }, headless: boolean): Promise<{ cdpPort: number }>;
+  ensureStoreChrome(store: { id: string; name: string; browser_config?: string | null }, headless: boolean): Promise<{ cdpPort: number }>;
   ensureWebChrome(headless: boolean): Promise<{ cdpPort: number }>;
 }
 
@@ -74,12 +80,37 @@ const portsByKey = new Map<string, number>();
 /** per-key 建连互斥（CDP browser 级端点单客户端，避免同 key 双连）。 */
 const connecting = new Map<string, Promise<CdpConnection>>();
 
+/** per-key tab 态（PRD §4.3）：活跃 tab + LRU；共享组会话另带 owned 标签所有权。 */
 interface TabState {
   activeTargetId: string | null;
   /** LRU：Map 插入序 = 最久未用在前；值 = 最近使用时刻。 */
   lru: Map<string, number>;
+  /** 标签所有权（仅共享组会话启用）：本店开出的 targetId 集合；null = 非共享
+   *（保留 targets[0] 收养与"列表=全浏览器"的 legacy 语义）。 */
+  owned: Set<string> | null;
 }
 const tabStates = new Map<string, TabState>();
+
+/** 一次工具调用的会话上下文：连接与 tab 双 key 解耦（共享组连接共用、标签按店隔离）。 */
+interface SessionCtx {
+  /** 连接表 key（connections/portsByKey/connecting）：`shared:<组>` / store_id / '_web'。 */
+  connKey: string;
+  /** tab 态 key（tabStates）：共享组 = `shared:<组>::<store_id>`；其余 = connKey。 */
+  tabKey: string;
+  /** 共享组会话（标签所有权语义生效）。 */
+  shared: boolean;
+  /** browser_sessions 落 current_url 的店 id；web 会话为 null 不落。 */
+  storeId: string | null;
+  /** CDP 端口（getConnection 用）。 */
+  port: number;
+}
+
+/** ctx 的 tab 态（共享组惰性建所有权集合）。 */
+function tabStateFor(ctx: SessionCtx): TabState {
+  const state = tabStateOf(ctx.tabKey);
+  if (ctx.shared && state.owned === null) state.owned = new Set();
+  return state;
+}
 
 /** target → sessionId 缓存，挂在连接实例上（WeakMap）：断连重建后自然失效重挂。 */
 const sessionCache = new WeakMap<CdpConnection, Map<string, string>>();
@@ -98,7 +129,7 @@ export function resetBrowseStateForTests(): void {
 function tabStateOf(key: string): TabState {
   let s = tabStates.get(key);
   if (!s) {
-    s = { activeTargetId: null, lru: new Map() };
+    s = { activeTargetId: null, lru: new Map(), owned: null };
     tabStates.set(key, s);
   }
   return s;
@@ -147,47 +178,106 @@ async function attachToTab(conn: CdpConnection, targetId: string): Promise<strin
 }
 
 /** 会话内默认寻址（PRD §4.3）：活跃 tab 仍存在 → 用它；否则取第一个页型；空 → 新开
- *（createUrl 给定时带着目标 url 开，对齐"无活跃 tab → createTarget(url)"，缺省 about:blank）。 */
-async function resolveTab(conn: CdpConnection, key: string, createUrl?: string): Promise<{ targetId: string; targets: CdpTargetInfo[] }> {
-  const state = tabStateOf(key);
+ *（createUrl 给定时带着目标 url 开，对齐"无活跃 tab → createTarget(url)"，缺省 about:blank）。
+ * 共享组（所有权语义）：只在**本店 owned 且存活**的 tab 里收敛——绝不收养他店 tab
+ *（targets[0] 收养是专用会话专属）；owned 全灭 → createTarget 新开并登记所有权。 */
+async function resolveTab(conn: CdpConnection, ctx: SessionCtx, createUrl?: string): Promise<{ targetId: string; targets: CdpTargetInfo[] }> {
+  const state = tabStateFor(ctx);
   const targets = await conn.getTargets();
+  if (ctx.shared) {
+    const live = new Set(targets.map((t) => t.targetId));
+    for (const tid of [...state.owned!]) if (!live.has(tid)) state.owned!.delete(tid); // 剪已死所有权
+    if (state.activeTargetId !== null && state.owned!.has(state.activeTargetId)) {
+      touchTab(ctx.tabKey, state.activeTargetId);
+      return { targetId: state.activeTargetId, targets };
+    }
+    // LRU 最新优先挑存活 owned；LRU 未覆盖（如进程重启后）退化为第一个 owned；全灭 → 新开
+    let pick: string | null = null;
+    for (const tid of [...state.lru.keys()].reverse()) {
+      if (state.owned!.has(tid)) {
+        pick = tid;
+        break;
+      }
+    }
+    if (pick === null && state.owned!.size > 0) pick = [...state.owned!][0]!;
+    const targetId = pick ?? (await conn.createTarget(createUrl));
+    state.owned!.add(targetId);
+    state.activeTargetId = targetId;
+    touchTab(ctx.tabKey, targetId);
+    return { targetId, targets };
+  }
   if (state.activeTargetId && targets.some((t) => t.targetId === state.activeTargetId)) {
-    touchTab(key, state.activeTargetId);
+    touchTab(ctx.tabKey, state.activeTargetId);
     return { targetId: state.activeTargetId, targets };
   }
   if (targets.length > 0) {
     const first = targets[0]!;
     state.activeTargetId = first.targetId;
-    touchTab(key, first.targetId);
+    touchTab(ctx.tabKey, first.targetId);
     return { targetId: first.targetId, targets };
   }
   const tid = await conn.createTarget(createUrl); // 永不关最后一个：浏览器至少保一个页型 tab
   state.activeTargetId = tid;
-  touchTab(key, tid);
+  touchTab(ctx.tabKey, tid);
   return { targetId: tid, targets };
 }
 
-/** 显式寻址（read/act/eval 可选 tab_id）：只作用于本次调用，不改活跃（PRD §4.3/§九.1）。 */
+/** 显式寻址（read/act/eval 可选 tab_id）：只作用于本次调用，不改活跃（PRD §4.3/§九.1）。
+ * 共享组：tab_id 必须 owned——非 owned / 不存在一律同一句 "not found among this store's
+ * tabs"（不区分两者，不给越权探测留 oracle）。 */
 async function resolveTargetId(
   conn: CdpConnection,
-  key: string,
+  ctx: SessionCtx,
   args: Record<string, unknown>,
 ): Promise<{ targetId: string; targets: CdpTargetInfo[] }> {
   const explicit = args["tab_id"];
-  if (explicit === undefined || explicit === null || explicit === "") return resolveTab(conn, key);
+  if (explicit === undefined || explicit === null || explicit === "") return resolveTab(conn, ctx);
   if (typeof explicit !== "string") throw new Error(`tab_id must be a string (got ${typeof explicit}).`);
+  if (ctx.shared) {
+    const state = tabStateFor(ctx);
+    const targets = await conn.getTargets();
+    const live = new Set(targets.map((t) => t.targetId));
+    if (!state.owned?.has(explicit) || !live.has(explicit)) {
+      throw new Error(`tab_id "${explicit}" not found among this store's tabs; use the tabs tool with action "list".`);
+    }
+    touchTab(ctx.tabKey, explicit);
+    return { targetId: explicit, targets };
+  }
   const targets = await conn.getTargets();
   if (!targets.some((t) => t.targetId === explicit)) {
     throw new Error(`tab_id "${explicit}" not found among page tabs; use the tabs tool with action "list".`);
   }
-  touchTab(key, explicit);
+  touchTab(ctx.tabKey, explicit);
   return { targetId: explicit, targets };
 }
 
-/** tab LRU（PRD §4.3）：新开 tab 后页型数超 12 → 关最久未用的非活跃；永不关最后一个页型 tab。 */
-async function enforceTabCap(conn: CdpConnection, key: string): Promise<void> {
-  const state = tabStateOf(key);
+/** tab LRU（PRD §4.3）：新开 tab 后页型数超 12 → 关最久未用的非活跃；永不关最后一个页型 tab。
+ * 共享组：上限只数**本店 owned 且存活**的 tab、只关 owned——绝不波及他店标签。 */
+async function enforceTabCap(conn: CdpConnection, ctx: SessionCtx): Promise<void> {
+  const state = tabStateFor(ctx);
   const targets = await conn.getTargets();
+  if (ctx.shared) {
+    const live = new Set(targets.map((t) => t.targetId));
+    for (const tid of [...state.lru.keys()]) {
+      if (!live.has(tid)) state.lru.delete(tid);
+    }
+    let alive = 0;
+    for (const t of targets) {
+      if (!state.owned?.has(t.targetId)) continue;
+      alive += 1;
+      if (!state.lru.has(t.targetId)) state.lru.set(t.targetId, 0);
+    }
+    for (const [tid] of [...state.lru]) {
+      if (alive <= TAB_CAP || alive <= 1) break; // 永不关本店最后一个 owned tab
+      if (tid === state.activeTargetId) continue; // 活跃豁免（即使它 LRU 最旧）
+      if (!state.owned?.has(tid)) continue; // 防御：LRU 理论只含 owned，仍不碰非 owned
+      await conn.closeTarget(tid);
+      state.owned.delete(tid);
+      state.lru.delete(tid);
+      alive -= 1;
+    }
+    return;
+  }
   const live = new Set(targets.map((t) => t.targetId));
   for (const tid of [...state.lru.keys()]) {
     if (!live.has(tid)) state.lru.delete(tid); // 外部已关的 tab 清出 LRU
@@ -339,18 +429,18 @@ export class BrowseToolkit {
   private async dispatch(name: BrowseToolName, args: Record<string, unknown>): Promise<unknown> {
     this.validateArgs(name, args); // 参数面校验先行：绝不为此碰 starter / 发 CDP 帧
     const session = await this.resolveSession(args);
-    const conn = await getConnection(session.key, session.port, this.connDeps);
+    const conn = await getConnection(session.connKey, session.port, this.connDeps);
     switch (name) {
       case "vibe_seller_browser_navigate":
-        return this.navigate(conn, session.key, args);
+        return this.navigate(conn, session, args);
       case "vibe_seller_browser_tabs":
-        return this.tabs(conn, session.key, args);
+        return this.tabs(conn, session, args);
       case "vibe_seller_browser_read":
-        return this.read(conn, session.key, args);
+        return this.read(conn, session, args);
       case "vibe_seller_browser_act":
-        return this.act(conn, session.key, args);
+        return this.act(conn, session, args);
       case "vibe_seller_browser_eval":
-        return this.evalTool(conn, session.key, args);
+        return this.evalTool(conn, session, args);
     }
   }
 
@@ -398,15 +488,17 @@ export class BrowseToolkit {
     }
   }
 
-  /** 会话解析（PRD §4.1，服务端解析——agent 永不传 URL/端口）。 */
-  private async resolveSession(args: Record<string, unknown>): Promise<{ key: string; port: number }> {
+  /** 会话解析（PRD §4.1，服务端解析——agent 永不传 URL/端口）。共享组入组店：
+   * 连接走 `shared:<组>` key（同组一条 ws），tab 态走 `shared:<组>::<store_id>`
+   * （每店专属标签集，所有权语义见 SessionCtx）。 */
+  private async resolveSession(args: Record<string, unknown>): Promise<SessionCtx> {
     const session = args["session"] === undefined ? "store" : args["session"];
     if (session !== "store" && session !== "web") {
       throw new Error(`Invalid session ${JSON.stringify(session)}: expected "store" or "web".`);
     }
     if (session === "web") {
       const { cdpPort } = await this.deps.starter.ensureWebChrome(this.deps.headless());
-      return { key: WEB_KEY, port: cdpPort };
+      return { connKey: WEB_KEY, tabKey: WEB_KEY, shared: false, storeId: null, port: cdpPort };
     }
     const taskRow = this.deps.db.prepare("SELECT store_id FROM tasks WHERE id = ?").get(this.taskId) as
       | { store_id: string | null }
@@ -414,8 +506,10 @@ export class BrowseToolkit {
     if (!taskRow || taskRow.store_id == null) {
       throw new Error(`Task ${this.taskId} has no bound store; bind a store to the task or pass session:"web".`);
     }
-    const storeRow = this.deps.db.prepare("SELECT id, name, browser_backend FROM stores WHERE id = ?").get(taskRow.store_id) as
-      | { id: string; name: string; browser_backend: string | null }
+    const storeRow = this.deps.db
+      .prepare("SELECT id, name, browser_backend, browser_config FROM stores WHERE id = ?")
+      .get(taskRow.store_id) as
+      | { id: string; name: string; browser_backend: string | null; browser_config: string | null }
       | undefined;
     if (!storeRow) {
       throw new Error(`Store ${taskRow.store_id} (bound to task ${this.taskId}) does not exist.`);
@@ -426,23 +520,35 @@ export class BrowseToolkit {
         `Store "${storeRow.name}" uses the ziniao anti-detect browser backend, which browser tools do not support; CDP direct connect covers chrome-backend stores and the web session only.`,
       );
     }
-    const { cdpPort } = await this.deps.starter.ensureStoreChrome({ id: storeRow.id, name: storeRow.name }, this.deps.headless());
-    return { key: storeRow.id, port: cdpPort };
+    const { cdpPort } = await this.deps.starter.ensureStoreChrome(
+      { id: storeRow.id, name: storeRow.name, browser_config: storeRow.browser_config },
+      this.deps.headless(),
+    );
+    const identity = storeSessionIdentity(storeRow);
+    const shared = identity.key.startsWith(SHARED_KEY_PREFIX);
+    return {
+      connKey: identity.key,
+      tabKey: shared ? `${identity.key}::${storeRow.id}` : identity.key,
+      shared,
+      storeId: storeRow.id,
+      port: cdpPort,
+    };
   }
 
   // ── 1. navigate ──
 
-  private async navigate(conn: CdpConnection, key: string, args: Record<string, unknown>): Promise<unknown> {
+  private async navigate(conn: CdpConnection, ctx: SessionCtx, args: Record<string, unknown>): Promise<unknown> {
     const url = args["url"] as string;
-    const state = tabStateOf(key);
+    const state = tabStateFor(ctx);
     let targetId: string;
     if (args["new_tab"] === true) {
       targetId = await conn.createTarget(url);
-      touchTab(key, targetId); // 新 tab 先进 LRU 最新位：cap 关闭永不波及刚开的 tab
-      await enforceTabCap(conn, key); // 此刻活跃仍指旧 tab——"活跃不被关"豁免有真实语义
+      state.owned?.add(targetId); // 共享组：新 tab 登记所有权
+      touchTab(ctx.tabKey, targetId); // 新 tab 先进 LRU 最新位：cap 关闭永不波及刚开的 tab
+      await enforceTabCap(conn, ctx); // 此刻活跃仍指旧 tab——"活跃不被关"豁免有真实语义
       state.activeTargetId = targetId; // cap 收拾完再切活跃
     } else {
-      targetId = (await resolveTab(conn, key, url)).targetId; // 无活跃 tab 时带着 url 新开（PRD §二）
+      targetId = (await resolveTab(conn, ctx, url)).targetId; // 无活跃 tab 时带着 url 新开（PRD §二）
     }
     const sessionId = await attachToTab(conn, targetId);
     await conn.send("Page.enable", undefined, { sessionId });
@@ -476,25 +582,28 @@ export class BrowseToolkit {
     } catch {
       // href/title 取不到不致命（如 load 超时的慢页面）：返回请求 url 与空 title
     }
-    if (key !== WEB_KEY) {
-      // store 会话 navigate 成功后落 current_url（列已存在，纯 UPDATE，无 schema 变更，PRD §4.3）
+    if (ctx.storeId !== null) {
+      // store 会话 navigate 成功后落 current_url（列已存在，纯 UPDATE，无 schema 变更，PRD §4.3；
+      // 共享组按调用店落自己的行——组内每店一行）
       this.deps.db
         .prepare("UPDATE browser_sessions SET current_url = ?, updated_at = ? WHERE store_id = ?")
-        .run(finalUrl, new Date().toISOString(), key);
+        .run(finalUrl, new Date().toISOString(), ctx.storeId);
     }
     return { tab_id: targetId, url: finalUrl, title, load_state: loaded ? "loaded" : "timeout" };
   }
 
   // ── 2. tabs ──
 
-  private async tabs(conn: CdpConnection, key: string, args: Record<string, unknown>): Promise<unknown> {
+  private async tabs(conn: CdpConnection, ctx: SessionCtx, args: Record<string, unknown>): Promise<unknown> {
     const action = args["action"] as string;
-    const state = tabStateOf(key);
+    const state = tabStateFor(ctx);
     if (action === "list") {
       const targets = await conn.getTargets();
+      // 共享组只列本店 owned 的 tab（他店标签不可见——tab 级防串店）
+      const visible = ctx.shared ? targets.filter((t) => state.owned?.has(t.targetId)) : targets;
       return {
         ok: true,
-        tabs: targets.map((t) => ({
+        tabs: visible.map((t) => ({
           tab_id: t.targetId,
           url: t.url,
           title: t.title,
@@ -505,30 +614,51 @@ export class BrowseToolkit {
     if (action === "switch") {
       const tabId = args["tab_id"];
       if (typeof tabId !== "string" || tabId.length === 0) throw new Error('tabs switch requires tab_id (string).');
-      const targets = await conn.getTargets();
-      if (!targets.some((t) => t.targetId === tabId)) {
-        throw new Error(`tab_id "${tabId}" not found among page tabs; use action "list".`);
+      if (ctx.shared) {
+        const targets = await conn.getTargets();
+        const live = new Set(targets.map((t) => t.targetId));
+        if (!state.owned?.has(tabId) || !live.has(tabId)) {
+          // 与 resolveTargetId 同款措辞：非 owned 与不存在不区分，不给越权探测留 oracle
+          throw new Error(`tab_id "${tabId}" not found among this store's tabs; use action "list".`);
+        }
+      } else {
+        const targets = await conn.getTargets();
+        if (!targets.some((t) => t.targetId === tabId)) {
+          throw new Error(`tab_id "${tabId}" not found among page tabs; use action "list".`);
+        }
       }
       state.activeTargetId = tabId;
-      touchTab(key, tabId);
+      touchTab(ctx.tabKey, tabId);
       return { ok: true, active_tab_id: tabId };
     }
     // close（校验面保证 action 只剩 close）
     const targets = await conn.getTargets();
-    if (targets.length <= 1) {
-      throw new Error("refuse to close the last tab: a browser session must keep at least one page tab.");
+    // 共享组在"本店 owned 且存活"里收口：可关到零（下次 resolveTab 自会新开），
+    // 但他店 tab 永不可关；专用会话保留"浏览器至少一个页型 tab"的 legacy 守卫
+    const candidates = ctx.shared ? targets.filter((t) => state.owned?.has(t.targetId)) : targets;
+    if (candidates.length <= (ctx.shared ? 0 : 1)) {
+      throw new Error(
+        ctx.shared
+          ? `tab_id ${JSON.stringify(args["tab_id"] ?? null)} not found among this store's tabs; use action "list".`
+          : "refuse to close the last tab: a browser session must keep at least one page tab.",
+      );
     }
     const tabId = typeof args["tab_id"] === "string" && args["tab_id"] !== "" ? (args["tab_id"] as string) : state.activeTargetId;
-    if (!tabId || !targets.some((t) => t.targetId === tabId)) {
-      throw new Error(`tab_id ${JSON.stringify(tabId ?? null)} not found among page tabs; use action "list".`);
+    if (!tabId || !candidates.some((t) => t.targetId === tabId)) {
+      throw new Error(
+        ctx.shared
+          ? `tab_id ${JSON.stringify(tabId ?? null)} not found among this store's tabs; use action "list".`
+          : `tab_id ${JSON.stringify(tabId ?? null)} not found among page tabs; use action "list".`,
+      );
     }
     await conn.closeTarget(tabId);
+    state.owned?.delete(tabId);
     state.lru.delete(tabId);
     if (state.activeTargetId !== tabId) {
       return { ok: true, closed_tab_id: tabId, active_tab_id: state.activeTargetId };
     }
     // 关的是活跃 tab：活跃顺延到最近未用的剩余 tab（LRU 尾先看），退化取列表第一个
-    const remaining = targets.filter((t) => t.targetId !== tabId);
+    const remaining = candidates.filter((t) => t.targetId !== tabId);
     let pick: string | null = null;
     for (const tid of [...state.lru.keys()].reverse()) {
       if (remaining.some((t) => t.targetId === tid)) {
@@ -538,15 +668,15 @@ export class BrowseToolkit {
     }
     const newActive = pick ?? remaining[0]?.targetId ?? null;
     state.activeTargetId = newActive;
-    if (newActive) touchTab(key, newActive);
+    if (newActive) touchTab(ctx.tabKey, newActive);
     return { ok: true, closed_tab_id: tabId, active_tab_id: newActive };
   }
 
   // ── 3. read ──
 
-  private async read(conn: CdpConnection, key: string, args: Record<string, unknown>): Promise<unknown> {
+  private async read(conn: CdpConnection, ctx: SessionCtx, args: Record<string, unknown>): Promise<unknown> {
     const mode = args["mode"] as string;
-    const { targetId, targets } = await resolveTargetId(conn, key, args);
+    const { targetId, targets } = await resolveTargetId(conn, ctx, args);
     if (mode === "info") {
       const t = targets.find((x) => x.targetId === targetId);
       return { tab_id: targetId, url: t?.url ?? "", title: t?.title ?? "" };
@@ -572,9 +702,9 @@ export class BrowseToolkit {
 
   // ── 4. act（单动作，一次一个工作单元） ──
 
-  private async act(conn: CdpConnection, key: string, args: Record<string, unknown>): Promise<unknown> {
+  private async act(conn: CdpConnection, ctx: SessionCtx, args: Record<string, unknown>): Promise<unknown> {
     const action = args["action"] as string;
-    const { targetId } = await resolveTargetId(conn, key, args);
+    const { targetId } = await resolveTargetId(conn, ctx, args);
     const sessionId = await attachToTab(conn, targetId);
     switch (action) {
       case "click":
@@ -666,9 +796,9 @@ export class BrowseToolkit {
 
   // ── 5. eval ──
 
-  private async evalTool(conn: CdpConnection, key: string, args: Record<string, unknown>): Promise<unknown> {
+  private async evalTool(conn: CdpConnection, ctx: SessionCtx, args: Record<string, unknown>): Promise<unknown> {
     const expression = args["expression"] as string;
-    const { targetId } = await resolveTargetId(conn, key, args);
+    const { targetId } = await resolveTargetId(conn, ctx, args);
     const sessionId = await attachToTab(conn, targetId);
     const out = await evalJs(conn, sessionId, expression);
     if (!out.hasValue) {

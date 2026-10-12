@@ -850,3 +850,152 @@ describe("建连失败恢复（会话键防砖化）", () => {
     expect(factoryCalls).toBe(2);
   });
 });
+
+// ── 共享浏览器组（share_group）：连接共用 + 标签所有权（2026-10-12） ──
+// 同组两店 = 同一 connKey（一条假传输）+ 各自 tabKey（owned 集合）。钉死：单连接复用、
+// list 只列本店 tab、switch/read/close 越权一律 "not found among this store's tabs"
+//（不区分不存在与不 owned，无越权探测 oracle）、不收养他店 tab（legacy 收养仅限专用
+// 会话）、LRU 上限只关本店 tab、navigate 的 current_url 按店落行。
+
+describe("共享浏览器组：连接共用与标签所有权", () => {
+  function seedSharedStores(): void {
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO stores (id, name, browser_backend, browser_config, created_at, updated_at) VALUES ('st-sha', '共享A', 'chrome', '{\"share_group\":\"grp\"}', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO stores (id, name, browser_backend, browser_config, created_at, updated_at) VALUES ('st-shb', '共享B', 'chrome', '{\"share_group\":\"grp\"}', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO tasks (id, created_by, store_id, title, status, created_at, updated_at) VALUES ('task-sha', 'u', 'st-sha', '共享任务A', 'running', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO tasks (id, created_by, store_id, title, status, created_at, updated_at) VALUES ('task-shb', 'u', 'st-shb', '共享任务B', 'running', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO browser_sessions (id, store_id, status, started_at, updated_at) VALUES ('sess-sha', 'st-sha', 'running', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO browser_sessions (id, store_id, status, started_at, updated_at) VALUES ('sess-shb', 'st-shb', 'running', ?, ?)").run(now, now);
+  }
+
+  /** 动态多 tab 假浏览器：createTarget 滚动追加 allTabs；getTargets 恒回全量页面列表。 */
+  function scriptSharedBrowser(): { allTabs: Record<string, unknown>[]; seedTab: (prefix: string) => string } {
+    const allTabs: Record<string, unknown>[] = [];
+    let n = 0;
+    const seedTab = (prefix: string): string => {
+      const id = `${prefix}-${++n}`;
+      allTabs.push(pageInfo(id, `https://${prefix}.example`));
+      return id;
+    };
+    server.on("Target.getTargets", () => ({ targetInfos: [...allTabs] }));
+    server.on("Target.createTarget", () => {
+      const id = seedTab("tt");
+      return { targetId: id };
+    });
+    return { allTabs, seedTab };
+  }
+
+  /** 共享组公共脚本：attach 记录 sessionId 序列 + navigate 终点 href/title。 */
+  function scriptAttachAndEval(): { attached: string[] } {
+    const attached: string[] = [];
+    server.on("Target.attachToTarget", () => {
+      const s = `s-${attached.length + 1}`;
+      attached.push(s);
+      return { sessionId: s };
+    });
+    server.on("Runtime.evaluate", () => ({ result: { value: JSON.stringify({ href: "https://nav.example/", title: "N" }) } }));
+    return { attached };
+  }
+
+  /** navigate 驱动器：等 Page.navigate 帧后补 load 事件（最后一次 attach 的 sessionId）。 */
+  async function driveNavigate(tk: BrowseToolkit, args: Record<string, unknown>, state: { navSeen: number; attached: string[] }): Promise<unknown> {
+    const p = tk.execute("vibe_seller_browser_navigate", args);
+    await until(() => server.fake.frames("Page.navigate").length > state.navSeen, "Page.navigate frame");
+    state.navSeen += 1;
+    server.fire("Page.loadEventFired", {}, state.attached[state.attached.length - 1]);
+    return p;
+  }
+
+  it("同组两店共用一条连接（fakes 恰 1 条）；navigate 各自落 current_url 到自己的行", async () => {
+    seedSharedStores();
+    const { attached } = scriptAttachAndEval();
+    const { allTabs } = scriptSharedBrowser();
+    void allTabs;
+    const state = { navSeen: 0, attached };
+    const tkA = makeToolkit("task-sha");
+    const tkB = makeToolkit("task-shb");
+
+    const ra = (await driveNavigate(tkA, { url: "https://a.example" }, state)) as { tab_id: string };
+    const rb = (await driveNavigate(tkB, { url: "https://b.example" }, state)) as { tab_id: string };
+    expect(ra.tab_id).not.toBe(rb.tab_id);
+    expect(server.fakes.length).toBe(1); // 同 connKey（shared:grp）：一条连接服务两店
+    const urls = db
+      .prepare("SELECT store_id, current_url FROM browser_sessions WHERE store_id IN ('st-sha','st-shb') ORDER BY store_id")
+      .all() as { store_id: string; current_url: string | null }[];
+    expect(urls).toEqual([
+      { store_id: "st-sha", current_url: "https://nav.example/" },
+      { store_id: "st-shb", current_url: "https://nav.example/" },
+    ]);
+  });
+
+  it("标签互不可见：list 只列本店 owned；switch/read/close 越权一律 not found among this store's tabs", async () => {
+    seedSharedStores();
+    const { attached } = scriptAttachAndEval();
+    scriptSharedBrowser();
+    const state = { navSeen: 0, attached };
+    const tkA = makeToolkit("task-sha");
+    const tkB = makeToolkit("task-shb");
+
+    const ra = (await driveNavigate(tkA, { url: "https://a.example" }, state)) as { tab_id: string };
+    const rb = (await driveNavigate(tkB, { url: "https://b.example" }, state)) as { tab_id: string };
+
+    const listA = (await tkA.execute("vibe_seller_browser_tabs", { action: "list" })) as { tabs: { tab_id: string }[] };
+    const listB = (await tkB.execute("vibe_seller_browser_tabs", { action: "list" })) as { tabs: { tab_id: string }[] };
+    expect(listA.tabs.map((t) => t.tab_id)).toEqual([ra.tab_id]);
+    expect(listB.tabs.map((t) => t.tab_id)).toEqual([rb.tab_id]);
+
+    await expect(tkB.execute("vibe_seller_browser_tabs", { action: "switch", tab_id: ra.tab_id })).rejects.toThrow(
+      /not found among this store's tabs/,
+    );
+    await expect(tkB.execute("vibe_seller_browser_read", { mode: "info", tab_id: ra.tab_id })).rejects.toThrow(
+      /not found among this store's tabs/,
+    );
+    await expect(tkB.execute("vibe_seller_browser_tabs", { action: "close", tab_id: ra.tab_id })).rejects.toThrow(
+      /not found among this store's tabs/,
+    );
+
+    // 本店关自己的 tab 允许（关到零也行，下次 resolveTab 自会新开）
+    const closed = (await tkB.execute("vibe_seller_browser_tabs", { action: "close", tab_id: rb.tab_id })) as {
+      ok: boolean;
+      closed_tab_id: string;
+      active_tab_id: string | null;
+    };
+    expect(closed).toEqual({ ok: true, closed_tab_id: rb.tab_id, active_tab_id: null });
+    const listB2 = (await tkB.execute("vibe_seller_browser_tabs", { action: "list" })) as { tabs: unknown[] };
+    expect(listB2.tabs).toEqual([]); // owned 已清空：A 的 tab 依旧不可见
+  });
+
+  it("不收养他店 tab：B 无 owned 而浏览器里只有 A 的 tab → navigate 必 createTarget 新开（legacy 收养仅限专用会话）", async () => {
+    seedSharedStores();
+    const { attached } = scriptAttachAndEval();
+    const { allTabs } = scriptSharedBrowser();
+    const state = { navSeen: 0, attached };
+    const tkA = makeToolkit("task-sha");
+    const tkB = makeToolkit("task-shb");
+
+    await driveNavigate(tkA, { url: "https://a.example" }, state); // A 新开（浏览器原本为空）
+    expect(allTabs.length).toBe(1);
+    const rb = (await driveNavigate(tkB, { url: "https://b.example" }, state)) as { tab_id: string };
+    expect(rb.tab_id).not.toBe((allTabs[0] as { targetId: string }).targetId); // 不收养 A 的 tab
+    expect(allTabs.length).toBe(2);
+  });
+
+  it("LRU 上限只关本店：A 开到 13 个 owned 触发 cap，closeTarget 只落 A 的 LRU 最旧非活跃 tab，B 的 tab 不动", async () => {
+    seedSharedStores();
+    const { attached } = scriptAttachAndEval();
+    scriptSharedBrowser();
+    const state = { navSeen: 0, attached };
+    const tkA = makeToolkit("task-sha");
+    const tkB = makeToolkit("task-shb");
+
+    const rb = (await driveNavigate(tkB, { url: "https://b.example" }, state)) as { tab_id: string };
+    const ra1 = (await driveNavigate(tkA, { url: "https://a-1.example" }, state)) as { tab_id: string };
+    for (let i = 2; i <= 13; i++) {
+      await driveNavigate(tkA, { url: `https://a-${i}.example`, new_tab: true }, state);
+    }
+    // A owned 恰 13 → 第 13 个 new_tab 的 enforceTabCap 关 A 的 LRU 最旧（a-1；活跃 a-12 豁免）
+    const closes = server.fake.frames("Target.closeTarget").map((f) => String((f.params as { targetId?: string })?.targetId));
+    expect(closes).toEqual([ra1.tab_id]);
+    expect(closes).not.toContain(rb.tab_id); // B 的 tab 绝不被 A 的 cap 波及
+  });
+});
