@@ -6,6 +6,10 @@
 // 差异记录：aux 返回的 `ws` 是 Chrome 自身 DevTools 端点（无 mux 的 /client-aux
 // 路径语义改为直连端点）；空闲清扫的 busy 判定用 TS 侧维护的 lastUsed 时间戳
 //（Python 用 mux 的 has_active_clients/idle_seconds，两者都是"最近无人用"语义）。
+// 共享浏览器组（2026-10-12）：stores.browser_config.share_group 非空的店加入组——
+// 同组共用一个 Chrome 进程（key `shared:<组>`、user-data-dir `_shared-<组>`），
+// cookie 按域名隔离（只许不同域名店铺同组）；browser_sessions 仍每店一行（组内
+// 多行共享同一 cdp_port/pid）；空闲清扫升级为组粒度（任一成员被活跃任务持有即豁免）。
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
@@ -17,6 +21,10 @@ import { ZiniaoNormalModeError, ensureZiniaoRunning, killAndRelaunchZiniao, type
 type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
 export class BrowserBusyError extends Error {}
+
+/** 共享组会话 key 前缀（sessions Map key = `shared:<组>`；组名经路由层校验
+ * [a-zA-Z0-9_-]{1,64}，不含冒号，前缀切分安全）。 */
+export const SHARED_KEY_PREFIX = "shared:";
 
 interface ManagedSession {
   key: string; // store_id 或 '_web'
@@ -30,6 +38,13 @@ interface ManagedSession {
 
 const sessions = new Map<string, ManagedSession>();
 const auxSessions = new Map<string, ManagedSession>();
+
+/** 测试隔离口：清空进程内会话表（对齐 browse.ts resetBrowseStateForTests 先例；
+ * sessions Map 模块级共享，跨用例残留会污染 sweep 的 stopped 计数）。 */
+export function resetStarterSessionsForTests(): void {
+  sessions.clear();
+  auxSessions.clear();
+}
 
 // ── 全局启动锁（GlobalLaunchLock 语义：忙 503 并点名持有者/时长。2026-10-12 起
 // "忙"= 有界等待 launchLockWaitMs 后仍被占才抛——持有者的正常窗口就是就绪等待
@@ -206,7 +221,8 @@ function markSessionRow(db: DatabaseSync, storeId: string, patch: { status: stri
     `INSERT INTO browser_sessions (id, store_id, cdp_port, proxy_port, proxy_pid, chrome_pid, status, started_at, updated_at)
      VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)
      ON CONFLICT(store_id) DO UPDATE SET
-       cdp_port=excluded.cdp_port, chrome_pid=excluded.chrome_pid, status=excluded.status, updated_at=excluded.updated_at`,
+       cdp_port=excluded.cdp_port, chrome_pid=COALESCE(excluded.chrome_pid, browser_sessions.chrome_pid),
+       status=excluded.status, updated_at=excluded.updated_at`,
   ).run(
     `sess-${storeId}`,
     storeId,
@@ -225,8 +241,9 @@ export class BrowserStarter {
     return join(this.deps.config.homeDir, "browser_profiles");
   }
 
-  /** 店铺浏览器：chrome → spawn；ziniao → ensure（+force 重拉）并落会话行。 */
-  async startStoreSession(store: { id: string; name: string; browser_backend: string | null; ziniao_account_id: string | null }, headless: boolean, ziniaoCreds?: { socket_port: number; client_path: string; user_info: ZiniaoUserInfo } | null): Promise<void> {
+  /** 店铺浏览器：chrome → spawn；ziniao → ensure（+force 重拉）并落会话行。
+   * chrome 分支经 storeSessionIdentity 解析 key/slug（share_group 入组 → 共享实例）。 */
+  async startStoreSession(store: { id: string; name: string; browser_backend: string | null; ziniao_account_id: string | null; browser_config?: string | null }, headless: boolean, ziniaoCreds?: { socket_port: number; client_path: string; user_info: ZiniaoUserInfo } | null): Promise<void> {
     await withLaunchLock(`start_session(${store.name})`, async () => {      if (store.browser_backend === "ziniao" && ziniaoCreds) {
         await ensureZiniaoRunning(ziniaoCreds.socket_port, ziniaoCreds.client_path, ziniaoCreds.user_info, this.deps.fetchImpl);
         markSessionRow(this.deps.db, store.id, { status: "running" });
@@ -234,7 +251,8 @@ export class BrowserStarter {
         return;
       }
       // chrome（含未知后端的兜底）
-      const session = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
+      const identity = storeSessionIdentity(store);
+      const session = await startChrome(identity.key, { slug: identity.slug, headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
       markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: session.cdpPort, chromePid: session.proc?.pid ?? null });
     }, this.deps.launchLockWaitMs);
   }
@@ -277,17 +295,31 @@ export class BrowserStarter {
    *（waitForCdpReadiness：就绪才返回，防冷启动"启动中"被误判"死亡"的 kill/respawn
    * churn），就绪后才落 browser_sessions 行（与 startStoreSession chrome 分支同构；
    * 超时 throw 时零行写入——markSessionRow 时序保持"就绪后"）。锁被占 →
-   * BrowserBusyError 原样向外抛（文案点名持有者/时长，调用方透传为工具错误）。 */
-  async ensureStoreChrome(store: { id: string; name: string }, headless: boolean): Promise<{ cdpPort: number }> {
-    const alive = await this.peekCdpPort(store.id);
-    if (alive !== null) return { cdpPort: alive };
+   * BrowserBusyError 原样向外抛（文案点名持有者/时长，调用方透传为工具错误）。
+   * 会话身份经 storeSessionIdentity：share_group 入组店共用 `shared:<组>` 实例，
+   * 返回 key 供 browse 层做连接/tab 分片。 */
+  async ensureStoreChrome(store: StoreIdentityInput, headless: boolean): Promise<{ cdpPort: number; key: string }> {
+    const identity = storeSessionIdentity(store);
+    const alive = await this.peekCdpPort(identity.key);
+    if (alive !== null) {
+      // 快路径也要保证"调用店"的会话行存在且指向本实例：共享组里 B 店复用 A 店拉起的
+      // 实例时，B 自己的行可能从未写过（browser_sessions 每店一行是生命周期/复位的事实源）。
+      // 行已一致则零写入；chrome_pid 缺省由 upsert 的 COALESCE 保留旧值。
+      const row = this.deps.db.prepare("SELECT status, cdp_port FROM browser_sessions WHERE store_id = ?").get(store.id) as
+        | { status: string; cdp_port: number | null }
+        | undefined;
+      if (!row || row.status !== "running" || row.cdp_port !== alive) {
+        markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: alive });
+      }
+      return { cdpPort: alive, key: identity.key };
+    }
     const session = await withLaunchLock(`ensure_session(${store.name})`, async () => {
-      const s = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
+      const s = await startChrome(identity.key, { slug: identity.slug, headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
       await waitForCdpReadiness(s.cdpPort!, s.proc, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, s.stderrLog);
       markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: s.cdpPort, chromePid: s.proc?.pid ?? null });
       return s;
     }, this.deps.launchLockWaitMs);
-    return { cdpPort: session.cdpPort! };
+    return { cdpPort: session.cdpPort!, key: identity.key };
   }
 
   /** 店铺无关 web Chrome 懒启动（key/slug 均 '_web'，进程内管理，不落
@@ -307,7 +339,9 @@ export class BrowserStarter {
 
   /** 空闲清扫：无活跃任务绑定 + 空闲 ≥ idleSeconds 的浏览器停掉。返回停止数。
    * 持有浏览器的任务态 = PENDING/QUEUED/DESIGNING/PLANNED/RUNNING（WAITING 不持有，
-   * 唤醒走懒启动）。 */
+   * 唤醒走懒启动）。共享组（`shared:<组>` key）为组粒度：组内**任一**成员店被活跃
+   * 任务持有即豁免（误杀共享实例会同时打断全组）；杀掉后组内全部成员行复位 idle
+   *（browser_sessions 每店一行，共享同一 cdp_port）。 */
   async sweepIdleBrowsers(idleSeconds: number): Promise<number> {
     if (idleSeconds <= 0) return 0;
     const db = this.deps.db;
@@ -318,17 +352,28 @@ export class BrowserStarter {
     const nostoreActive = holds.some((r) => r.store_id === null);
     let stopped = 0;
     const cutoff = Date.now() - idleSeconds * 1000;
+    const groupMembers = groupMembersOf(db);
+    const resetRow = db.prepare(
+      "UPDATE browser_sessions SET status = 'idle', cdp_port = NULL, chrome_pid = NULL, updated_at = ? WHERE store_id = ?",
+    );
 
     for (const [key, session] of [...sessions]) {
+      let memberIds: string[] = [];
       if (key === "_web") {
         if (nostoreActive || session.lastUsedAt > cutoff) continue;
-      } else if (holdStores.has(key) || session.lastUsedAt > cutoff) {
-        continue;
+      } else {
+        memberIds = key.startsWith(SHARED_KEY_PREFIX) ? (groupMembers.get(key.slice(SHARED_KEY_PREFIX.length)) ?? []) : [key];
+        if (memberIds.some((id) => holdStores.has(id)) || session.lastUsedAt > cutoff) continue;
       }
       session.proc?.kill();
       sessions.delete(key);
-      if (key !== "_web") {
-        db.prepare("UPDATE browser_sessions SET status = 'idle', cdp_port = NULL, chrome_pid = NULL, updated_at = ? WHERE store_id = ?").run(new Date().toISOString(), key);
+      for (const id of memberIds) resetRow.run(new Date().toISOString(), id);
+      if (key.startsWith(SHARED_KEY_PREFIX) && memberIds.length === 0) {
+        // 组已无成员（全部退组/删店后实例还在）：按端口兜底复位，防残留 running 行指向已杀实例
+        db.prepare("UPDATE browser_sessions SET status = 'idle', cdp_port = NULL, chrome_pid = NULL, updated_at = ? WHERE cdp_port = ?").run(
+          new Date().toISOString(),
+          session.cdpPort,
+        );
       }
       stopped += 1;
     }
@@ -411,4 +456,51 @@ function storeSlugOf(name: string, id: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || `store-${id.slice(0, 8)}`;
+}
+
+export interface StoreIdentityInput {
+  id: string;
+  name: string;
+  /** stores.browser_config 原始 JSON 文本（share_group 的唯一来源）。 */
+  browser_config?: string | null;
+}
+
+export interface StoreSessionIdentity {
+  /** sessions Map key：入组 → `shared:<组>`；否则 store.id（原语义）。 */
+  key: string;
+  /** user-data-dir 目录名：入组 → `_shared-<组>`；否则店铺名 slug。 */
+  slug: string;
+}
+
+/** 店铺浏览器会话身份解析（共享组的单一事实源，browse 层复用）：
+ * browser_config.share_group 非空字符串 → 组会话；坏 JSON / 非字符串 / 空串
+ * 一律按未入组处理（路由层已挡非法值，此处宽容兜底保启动可用）。 */
+export function storeSessionIdentity(store: StoreIdentityInput): StoreSessionIdentity {
+  let group: unknown;
+  try {
+    group = store.browser_config ? (JSON.parse(store.browser_config) as Record<string, unknown>)["share_group"] : undefined;
+  } catch {
+    group = undefined;
+  }
+  if (typeof group === "string" && group !== "") {
+    return { key: `${SHARED_KEY_PREFIX}${group}`, slug: `_shared-${group}` };
+  }
+  return { key: store.id, slug: storeSlugOf(store.name, store.id) };
+}
+
+/** 组成员表（group → 成员 store_id 列表），从 stores 全量小表解析（每次 sweep 重建，
+ * 免维护失效缓存）。 */
+function groupMembersOf(db: DatabaseSync): Map<string, string[]> {
+  const members = new Map<string, string[]>();
+  const rows = db.prepare("SELECT id, browser_config FROM stores").all() as { id: string; browser_config: string | null }[];
+  for (const row of rows) {
+    const identity = storeSessionIdentity({ id: row.id, name: "", browser_config: row.browser_config });
+    if (identity.key.startsWith(SHARED_KEY_PREFIX)) {
+      const group = identity.key.slice(SHARED_KEY_PREFIX.length);
+      const list = members.get(group) ?? [];
+      list.push(row.id);
+      members.set(group, list);
+    }
+  }
+  return members;
 }

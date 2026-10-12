@@ -10,20 +10,10 @@ import { join } from "node:path";
 import { HttpError } from "./types";
 import { getCurrentUser, type AuthContext } from "./auth";
 import type { ServerConfig } from "./config";
-import { BrowserBusyError, BrowserStarter, ZiniaoNormalModeError, forceRelaunchZiniao } from "./browser/starter";
+import { BrowserBusyError, BrowserStarter, ZiniaoNormalModeError, forceRelaunchZiniao, storeSessionIdentity } from "./browser/starter";
 import type { ZiniaoUserInfo } from "./browser/ziniao";
 import { readBookmarks, readZiniaoBookmarks } from "./browser/bookmarks";
 import { deriveFernetKey, fernetDecryptText } from "./crypto/fernet";
-
-function storeSlugOf(name: string, id: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-zA-Z0-9_-]/g, "-")
-    .replace(/_/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || `store-${id.slice(0, 8)}`;
-}
 
 export interface BrowserDeps {
   config: ServerConfig;
@@ -57,14 +47,15 @@ export function registerBrowserRoutes(app: Hono, deps: BrowserDeps): void {
   });
 
   // 店铺书签（stores.py 的遗留项，本批收回）：读店铺浏览器 profile 的 Bookmarks。
+  // slug 经 storeSessionIdentity：入组店的 profile 在 `_shared-<组>`，不在店铺 slug 目录。
   app.get("/api/stores/:store_id/bookmarks", (c) => {
     getCurrentUser(c, auth);
     const store = db.prepare("SELECT * FROM stores WHERE id = ?").get(c.req.param("store_id") ?? "") as
-      | { id: string; name: string; browser_backend: string | null; browser_oauth: string | null }
+      | { id: string; name: string; browser_backend: string | null; browser_config: string | null; browser_oauth: string | null }
       | undefined;
     if (!store) throw new HttpError(404, "Store not found");
     if (store.browser_backend === "chrome") {
-      return c.json(readBookmarks(config.homeDir, storeSlugOf(store.name, store.id)));
+      return c.json(readBookmarks(config.homeDir, storeSessionIdentity(store).slug));
     }
     if (store.browser_backend === "ziniao" && store.browser_oauth) {
       return c.json(readZiniaoBookmarks(store.browser_oauth));

@@ -162,7 +162,7 @@ describe("ensureStoreChrome（慢路径：锁内拉起 + 有界就绪等待 + �
       st.ensureStoreChrome(store, true),
       st.ensureStoreChrome(store, true),
     ]);
-    const fulfilled = results.filter((r): r is PromiseFulfilledResult<{ cdpPort: number }> => r.status === "fulfilled");
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof st.ensureStoreChrome>>> => r.status === "fulfilled");
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     expect(fulfilled.length).toBeGreaterThanOrEqual(1);
     for (const f of fulfilled) expect(f.value.cdpPort).toBeGreaterThan(0);
