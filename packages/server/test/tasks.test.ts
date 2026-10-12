@@ -75,6 +75,36 @@ describe("stores 契约", () => {
     expect(browser.status).toBe(404);
   });
 
+  it("share_group 契约：合法入组/改组/退组直通；类型与字符集非法 400；ziniao 禁入组", async () => {
+    // 合法：字母/数字/连字符/下划线，创建与读回直通（browser_config 整包 JSON 语义不变）
+    const s = (await (await post("/api/stores", { name: "ShareMain", browser_config: { share_group: "main" } })).json()) as {
+      id: string;
+      browser_config: Record<string, unknown>;
+    };
+    expect(s.browser_config).toEqual({ share_group: "main" });
+    // PUT 整包替换改组名；空串 = 显式退组（合法）
+    const upd = await put(`/api/stores/${s.id}`, { browser_config: { share_group: "eu-west_2" } });
+    expect(((await upd.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ share_group: "eu-west_2" });
+    const leave = await put(`/api/stores/${s.id}`, { browser_config: { share_group: "" } });
+    expect(((await leave.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ share_group: "" });
+    // 非法：类型错 / 空白字符 / 冒号（tab key 分隔符）/ 超 64 字符 → 400
+    for (const [i, bad] of [7, null, "has space", "a:b", "x".repeat(65)].entries()) {
+      const res = await post("/api/stores", { name: `ShareBad${i}`, browser_config: { share_group: bad } });
+      expect(res.status).toBe(400);
+    }
+    const badPut = await put(`/api/stores/${s.id}`, { browser_config: { share_group: "a b" } });
+    expect(badPut.status).toBe(400);
+    // ziniao 店禁入组：创建直接 400；已有 ziniao 店 PUT 入组 400（browse 工具不支持 ziniao）
+    const zCreate = await post("/api/stores", { name: "ZiniaoShare", browser_backend: "ziniao", browser_config: { share_group: "main" } });
+    expect(zCreate.status).toBe(400);
+    const z = (await (await post("/api/stores", { name: "ZiniaoPlain", browser_backend: "ziniao" })).json()) as { id: string };
+    const zPut = await put(`/api/stores/${z.id}`, { browser_config: { share_group: "main" } });
+    expect(zPut.status).toBe(400);
+    // ziniao 店 browser_config 不带 share_group 的其他键不受影响（代理等原语义）
+    const zProxy = await put(`/api/stores/${z.id}`, { browser_config: { proxy_server: "http://127.0.0.1:7890" } });
+    expect(zProxy.status).toBe(200);
+  });
+
   it("有活跃任务的店铺不可删（409）；删除幂等返回 {ok:true}", async () => {
     const store = (await (await post("/api/stores", { name: "Doomed" })).json()) as { id: string };
     await post("/api/tasks", { store_id: store.id, title: "活跃任务", plan_mode: false });

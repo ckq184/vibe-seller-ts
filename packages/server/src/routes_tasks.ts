@@ -200,6 +200,21 @@ export function creatorNames(db: DatabaseSync, tasks: TaskRow[]): Map<string, st
   return map;
 }
 
+// ── 共享浏览器组（share_group）：browser_config.share_group 非空 = 该店加入组，
+// 与组内店铺共用一个 Chrome（key `shared:<组>` + 共享 user-data-dir，cookie 按域名
+// 隔离——只允许不同域名的店同组）。空串 = 显式退组；缺省 = 一店一浏览器（原语义）。 ──
+const SHARE_GROUP_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+function validateShareGroup(shareGroup: unknown, backend: string): void {
+  if (shareGroup === undefined) return;
+  if (typeof shareGroup !== "string" || (shareGroup !== "" && !SHARE_GROUP_RE.test(shareGroup))) {
+    throw new HttpError(400, "browser_config.share_group must be a string matching [a-zA-Z0-9_-]{1,64}, or an empty string to leave the group");
+  }
+  if (shareGroup !== "" && backend === "ziniao") {
+    throw new HttpError(400, "browser_config.share_group is not supported for ziniao-backend stores (browser tools do not support ziniao)");
+  }
+}
+
 /** 阻塞改名/删除的状态：ACTIVE + queued（对齐 _BLOCKING_STATUSES）。 */
 const BLOCKING = new Set([...ACTIVE, "queued"]);
 
@@ -250,6 +265,7 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       platform_countries?: Record<string, string[]>;
     };
     if (!body.name) throw new HttpError(422, "name required");
+    validateShareGroup(body.browser_config?.["share_group"], body.browser_backend ?? "chrome");
     const id = crypto.randomUUID();
     const now = nowIso();
     db.prepare(
@@ -311,6 +327,7 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       countries?: string[];
       platform_countries?: Record<string, string[]>;
     };
+    validateShareGroup(body.browser_config?.["share_group"], store.browser_backend);
     if (body.name !== undefined && body.name !== store.name) {
       const blocking = db
         .prepare("SELECT COUNT(*) AS n FROM tasks WHERE store_id = ? AND status IN ('designing','running','queued')")
