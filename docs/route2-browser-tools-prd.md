@@ -73,6 +73,8 @@
 → 执行命令 → 返回
 ```
 
+**共享浏览器组（2026-10-12 修订）**：`stores.browser_config.share_group` 非空的店加入组——会话解析升级为**双 key**：连接 key = `shared:<组>`（同组共用一个 Chrome 进程 + 一个 user-data-dir `_shared-<组>`，一条浏览器级 ws，CDP flatten sessionId 天然多路复用，与"单客户端"裁决不冲突：连接仍只被本执行器独占）；tab 态 key = `shared:<组>::<store_id>`，并启用**标签所有权**（见 4.3）。路由层校验：share_group 须匹配 `[a-zA-Z0-9_-]{1,64}`（空串 = 退组），ziniao 店禁入组。`browser_sessions` 仍每店一行（组内多行共享同一 cdp_port/chrome_pid）；空闲清扫升级为组粒度（组内任一成员被活跃任务持有即豁免；杀掉后全成员行复位）。未入组店语义逐字不变。
+
 ### 4.2 CDP 连接层（单客户端，无 mux）
 
 - 连接 = `GET /json/version` 取浏览器级 `webSocketDebuggerUrl` → 一条 ws；命令经 `Target.attachToTarget {flatten:true}` 取 sessionId，后续命令带 sessionId 作用域到 tab。
@@ -84,7 +86,8 @@
 
 - 每会话内存态：`activeTabId` + tab LRU。`new_tab` 超过上限 **12**（原版 VIBE_TAB_CAP）→ 关最久未用的非活跃 tab；**永不关最后一个 tab**（原版 ziniao keep_last_page 教训在 chrome 后端同样成立）。
 - `navigate/act/read/eval` 缺省作用于 activeTab；`read/act/eval` 接受可选 `tab_id` 显式寻址（并发同店任务的已知干扰见 §九）。
-- navigate 成功后更新 `browser_sessions.current_url`（列已存在，纯 UPDATE，无 schema 变更）。
+- navigate 成功后更新 `browser_sessions.current_url`（列已存在，纯 UPDATE，无 schema 变更；共享组按调用店落各自的行）。
+- **标签所有权（2026-10-12，仅共享组会话）**：每店维护 owned 标签集合——list 只列本店 owned 且存活的 tab；`tab_id` 越权（别店的 / 不存在的）一律同句 "not found among this store's tabs"（不区分两者，无探测 oracle）；不收养他店 tab（targets[0] 收养语义仅限专用会话）；LRU 上限只数本店、只关本店（永不波及他店标签）；本店可关到零（下次 resolveTab 自会新开）。
 
 ### 4.4 动作语义（act）
 
@@ -134,6 +137,7 @@
 ## 七、非目标
 
 1. **不做** CDPMuxProxy / 多客户端复用（单客户端形态不存在该问题；原版 1700 行不移植）。
+   - **2026-10-12 修订**：共享浏览器组以"单客户端 + 连接层内多路复用 + tab 所有权"形态落了**受限共享**——同组店铺共用一个 Chrome 进程，但连接仍只被本执行器独占（一条 ws，CDP flatten sessionId 天然按 tab 多路复用，无需代理）；原版 mux 解决的"多个 daemon 各自独立 client 视图"问题依旧不存在，本条裁决本体不变。
 2. **不做** wrapper bash 生成 / browser-use daemon / pid reaper / worker slots（无独立进程模型）。
 3. **不做** ziniao CDP 驱动（SBP 注入、startBrowser 重试、稳定性检查——浏览器层红线，见 5.1）。
 4. **不做** aux 双浏览器分流（`_web` 会话已承载"店铺无关网页"场景；更细分流是 prompt 级规则，原版亦然）。
@@ -195,3 +199,4 @@
 2. **无 auto-wait**：SPA 异步渲染需 agent 用 `wait` 动作或跨调用轮询（原版同款纪律，写入工具 description）。
 3. **浏览器崩溃页状态丢失**：懒恢复后是干净 tab（profile 登录态在，页面状态不在），agent 需重新导航。
 4. **run 预算约束**：重浏览任务（>40 次工具调用）会被既有 run 预算截停——这是全局既有约束，非本批引入。
+5. **共享组 cookie 级不隔离（2026-10-12 取舍明示）**：同组店铺共用一个 user-data-dir，cookie 按**域名**隔离——不同域名的店可同时保持登录；**同平台同国家的两家店是同一域名，登录会互踢，严禁入同一组**（路由层无法校验域名，靠配置纪律）。tab 所有权只挡"误操作别店标签"，挡不住 A 店任务导航到 B 店域名（会带 B 的登录态）——防串店在 cookie 级被共享组削弱，这是方案甲（共享 profile）的本质取舍；需要硬隔离的场景保持一店一浏览器（不配 share_group）。入组店用全新共享 profile，每店需重新登录一次；退组即回原 per-store profile 的旧登录态。

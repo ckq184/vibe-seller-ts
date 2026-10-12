@@ -29,6 +29,8 @@
 
 > **状态（2026-10-10，双重审查通过）**：实现完成——commit 链 `0e85f94`（CDP 连接层）→`9b67185`（starter 懒启动入口）→`22ecdd6`（browse 五工具执行器）→`e391ef4`（注册/开关/引擎装配）→`86bfe5b`（真 Chrome 冒烟暴露的 flatten 事件顶层 sessionId 缺陷修复）→`ab16054`（按需真实冒烟，`VIBE_BROWSER_SMOKE=1 npx vitest run packages/server/test/browser-real.smoke.test.ts`）→`8005a03`/`b67963a`（规格审查修复：CI headless 对齐 + touch↔清扫直接证据 + 闭环单链）→`ec65422`（审查 Major1：传输 open 前失败 settle，防会话键砖化）→`05713ca`（审查 Major2：慢路径就绪等待，消冷启动 kill/respawn churn）→`506f8c2`（冒烟清理抗 Windows 句柄时序）。PRD 见 `docs/route2-browser-tools-prd.md`（裸 CDP 裁决），审查落档见 `docs/审查记录.md` 路线 2 节。27 工具面（新增 `vibe_seller_browser_navigate/tabs/read/act/eval`）+ `browser_tools_enabled` 开关（缺省开，Settings 可关）；闭环由假 CDP 级测试 + 真 Chrome 冒烟双重实证，全量测试 496 通过 / 3 skipped。完成条件中"真实店铺页面闭环"待用户真实任务人工验收；ziniao 后端店铺暂不支持（PRD §5.1 边界：结构化错误，绝不 spawn 无登录态替代 Chrome）。冷启动竞态已由就绪等待消除；其余遗留台账见审查记录路线 2 节。
 
+> **增量（2026-10-12，共享浏览器组）**：`share_group` 入组店铺共用一个 Chrome（方案甲：共享 user-data-dir + tab 级所有权防串店；cookie 按域名隔离，同域店铺禁同组）——`7150be4`（路由层校验）→`8be2d51`（starter 共享会话 key/slug/sweep 组粒度）→`5c4ff47`（browse 双 key 与标签所有权）。PRD 修订见 `docs/route2-browser-tools-prd.md` §4.1/§4.3/§七.1/§九.5。真实多店场景人工验收待用户执行。
+
 ## 路线 3：宪法门禁建设
 
 **做什么**：把 `docs/constitution.md` 第二节落地表里仍为"待建设"的四项建成机器门禁——① `verify` 一键脚本（测试+类型+构建+diff 范围四门禁合成一条命令，替代交付报告里的手工四门禁）→ ② 范围检查脚本（`git diff` 文件清单 vs 任务声明范围）→ ③ commit-msg hook（Conventional Commits 校验）→ ④ secret 扫描（gitleaks 或等价）。每建成一项把落地表状态改为脚本路径并删除过渡期安排。
