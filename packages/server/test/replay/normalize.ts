@@ -15,6 +15,9 @@
 //   share_group（仅 browser_config 内）两侧丢弃——方案A（2026-10-12）TS 有意扩展：
 //             chrome 建店缺省入组 main，原版录制无此键；share_group 自身语义契约由
 //             tasks.test.ts 契约用例钉住，browser_config 其余键（proxy_*）照常深比
+//   queue_drain 作业条目（仅 cron 作业清单数组内）两侧丢弃——2026-10-12 TS 有意扩展：
+//             队列排水看门狗（finish 漏排水的纵深防御），原版录制无此作业；注册与
+//             排水语义由 orchestrator-queue.test.ts 钉住，清单其余条目照常逐条深比
 // 键集合、数组长度、嵌套结构一律原样 deep-equal。
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -43,7 +46,21 @@ export function normalizeValue(value: unknown, key = ""): unknown {
     if (WIN_PATH_RE.test(value) || POSIX_PATH_RE.test(value)) return "<abspath>";
     return value;
   }
-  if (Array.isArray(value)) return value.map((v) => normalizeValue(v, key));
+  if (Array.isArray(value)) {
+    // queue_drain 有意分歧：cron 作业清单数组里两侧丢弃该条目（录制侧本就没有，
+    // 过滤对 fixture 侧是零操作）。条件钉死为"含 job_id+trigger 的作业条目"，
+    // 普通数组绝不受影响。
+    const jobs = value.filter(
+      (v) =>
+        !(
+          v !== null &&
+          typeof v === "object" &&
+          (v as Record<string, unknown>).job_id === "queue_drain" &&
+          typeof (v as Record<string, unknown>).trigger === "string"
+        ),
+    );
+    return jobs.map((v) => normalizeValue(v, key));
+  }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     const obj = value as Record<string, unknown>;

@@ -101,12 +101,17 @@ export class TaskOrchestrator {
     return { pending: true, request_id: entry.pendingGateRequestId, questions: [{ kind: "tool_approval" }] };
   }
 
-  private storeBusy(storeId: string | null): boolean {
+  /** 该店是否有 run 正在执行（只看 running 表，不含排队）。 */
+  private storeRunning(storeId: string | null): boolean {
     if (!storeId) return false;
     for (const taskId of this.running.keys()) {
       if (this.storeOf(taskId) === storeId) return true;
     }
-    return (this.queues.get(storeId)?.length ?? 0) > 0;
+    return false;
+  }
+
+  private storeBusy(storeId: string | null): boolean {
+    return this.storeRunning(storeId) || (this.queues.get(storeId)?.length ?? 0) > 0;
   }
 
   private storeOf(taskId: string): string | null {
@@ -191,6 +196,7 @@ export class TaskOrchestrator {
           sendTaskFailed(db, config.homeDir, fresh, TaskFailurePhase.PRE_RUNNING, TaskFailureCategory.AGENT_SET_ERROR);
         }
       }
+      this.drainQueues(); // 容量已随 active-=1 释放：这里不排水，排队任务要挂到下次 finish/看门狗
       return;
     }
 
@@ -488,7 +494,7 @@ export class TaskOrchestrator {
     this.running.delete(entry.taskId);
     this.active = Math.max(0, this.active - 1);
     void entry.dispose?.().catch(() => {});
-    this.drain();
+    this.drainQueues();
   }
 
   /**
@@ -556,11 +562,14 @@ export class TaskOrchestrator {
     return "committed";
   }
 
-  /** 队列排水：每个店铺队头各排一个（全局空位允许时）。 */
-  private drain(): void {
+  /** 队列排水：每个店铺队头各排一个（全局空位允许时）。公开：queue_drain 看门狗作业
+   * 周期调用（finish 漏排水的兜底）。店铺占用只看 storeRunning——2026-10-12 实测
+   * 事故：此前复用 storeBusy（含"队列非空"），队头任务自己把自家泳道判忙，店铺
+   * 泳道永远排不出，queued 任务只能等重启恢复才开工。 */
+  drainQueues(): void {
     const max = this.deps.maxConcurrent ?? 2;
     for (const [storeId, q] of [...this.queues.entries()]) {
-      if (q.length === 0 || this.active >= max || this.storeBusy(storeId)) continue;
+      if (q.length === 0 || this.active >= max || this.storeRunning(storeId)) continue;
       const next = q.shift()!;
       const opts = this.queuedOpts.get(next) ?? { mode: "execute" as RunMode };
       this.queuedOpts.delete(next);

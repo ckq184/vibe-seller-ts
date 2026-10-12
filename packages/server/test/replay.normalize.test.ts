@@ -43,6 +43,17 @@ describe("normalizeValue", () => {
     );
   });
 
+  it("queue_drain 看门狗作业条目两侧丢弃（TS 有意扩展：原版录制无此作业）；非作业数组不受影响", () => {
+    const jobs = [
+      { job_id: "stall_reaper", name: "reap_stalled_running_tasks", next_run: "<iso>", paused: false, trigger: "interval[0:01:00]" },
+      { job_id: "queue_drain", name: "drain_task_queues", next_run: "<iso>", paused: false, trigger: "interval[0:01:00]" },
+    ];
+    expect(normalizeValue(jobs)).toEqual([jobs[0]]);
+    // 条件钉死：缺 trigger 键的对象不视作作业条目，普通数组原样保留
+    expect(normalizeValue([{ job_id: "queue_drain" }])).toEqual([{ job_id: "queue_drain" }]);
+    expect(normalizeValue(["queue_drain"])).toEqual(["queue_drain"]);
+  });
+
   it("mtime 键 → <mtime>；*.db 条目 size → <dbsize>", () => {
     expect(normalizeValue(1791507304.197585, "mtime")).toBe("<mtime>");
     const entry = normalizeValue({ path: "data\\vibe_seller.db", is_dir: false, size: 212992 });

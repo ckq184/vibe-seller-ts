@@ -297,7 +297,7 @@ export interface SchedulerBootResult {
 }
 
 /**
- * start_scheduler 等价：注册 7 个系统周期作业 + 重建 schedule 作业 + 任务队列恢复。
+ * start_scheduler 等价：注册 8 个系统周期作业 + 重建 schedule 作业 + 任务队列恢复。
  * email_sync（4.6：全账户 IMAP → per-account SQLite，信号量并发 3）与
  * idle_browser_sweeper（4.6：无活跃任务绑定且空闲 ≥ VIBE_BROWSER_IDLE_S 的浏览器
  * 停掉，0 禁用）已接入；测试可用 deps.emailSyncFn/idleSweepFn 覆盖本体。
@@ -332,6 +332,12 @@ export function startScheduler(deps: SchedulerDeps, opts?: { scheduler?: VibeSch
     });
     interval("stall_reaper", "reap_stalled_running_tasks", 60_000, () => {
       reapStalledRunningTasks(deps);
+    });
+    // 队列排水看门狗（2026-10-12 实测事故的纵深防御）：finish 漏排水时 queued 任务
+    // 曾只能等重启恢复才开工。drainQueues 幂等且空队列零成本，60s 兜底把这类故障的
+    // 最大滞后从"到下次重启"收敛到一分钟。
+    interval("queue_drain", "drain_task_queues", 60_000, () => {
+      deps.orchestrator.drainQueues();
     });
     interval("idle_browser_sweeper", "sweep_idle_browsers", 60_000, () => {
       if (deps.idleSweepFn) return void deps.idleSweepFn();
