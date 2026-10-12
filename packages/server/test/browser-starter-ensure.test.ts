@@ -4,7 +4,8 @@
 // 并落 browser_sessions 行（status=running + cdp_port + chrome_pid）；恒败探针 + 小上限 →
 // 超时 throw（含 pid 与 within 语义）且**不落 running 行**（markSessionRow 时序保持"就绪后"，
 // 审查 Major2：防冷启动 kill/respawn churn 与假 running 行）；ensureWebChrome（'_web'）
-// 进程内管理、不落行；锁被占 → BrowserBusyError 原样向外抛。
+// 进程内管理、不落行；锁被占 → 有界等待接力（launchLockWaitMs，缺省 12s，2026-10-12 起），
+// 等满窗口仍被占才按原文案抛 BrowserBusyError（语义钉子移至 browser-starter-recovery.test.ts）。
 //
 // 测试边界声明：快路径"存活 → touch lastUsedAt → 复用端口"的复用语义由 T3 的 browse
 // 假 starter 行为测试覆盖（sessions Map 模块私有，本文件无注入口）；本文件只钉慢路径与
@@ -146,10 +147,9 @@ describe("ensureStoreChrome（慢路径：锁内拉起 + 有界就绪等待 + �
     expect(await st.peekCdpPort(store.id)).toBe(r2.cdpPort); // 新实例探活命中
   });
 
-  it("并发两个 ensure（恒 ok 探针：慢路径首轮即就绪）：至少一方成功；拒绝方必为 BrowserBusyError（锁立即抛不排队）", async () => {
-    // withLaunchLock 是"忙即抛"非排队：微任务时序下第二方通常在第一方持锁（freePort/spawn/
-    // 就绪轮询 await）期间调用 → 抛 BrowserBusyError；若锁已释放则快路径探活命中同样成功。
-    // 不把断言绑死在事件循环细节上，放宽为：
+  it("并发两个 ensure（恒 ok 探针：慢路径首轮即就绪）：有界等待下双方串行成功或恰有拒绝者且必为 BrowserBusyError", async () => {
+    // 2026-10-12 起锁"忙"= 有界等待接力：第二方通常等第一方释放（50ms 就绪）后走
+    // 快路径探活命中 → 双方都成功。不把断言绑死在事件循环细节上，放宽为：
     // 两者都 resolve，或恰有拒绝者且必为 BrowserBusyError（文案点名全局启动锁）。
     const st = new BrowserStarter({
       config,

@@ -7,8 +7,8 @@
 // 路径语义改为直连端点）；空闲清扫的 busy 判定用 TS 侧维护的 lastUsed 时间戳
 //（Python 用 mux 的 has_active_clients/idle_seconds，两者都是"最近无人用"语义）。
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -23,6 +23,7 @@ interface ManagedSession {
   slug: string;
   proc: ChildProcess | null;
   cdpPort: number | null;
+  stderrLog: string; // Chrome stderr 落盘路径（秒退/单实例转发的唯一现场证据）
   startedAt: number;
   lastUsedAt: number;
 }
@@ -30,23 +31,33 @@ interface ManagedSession {
 const sessions = new Map<string, ManagedSession>();
 const auxSessions = new Map<string, ManagedSession>();
 
-// ── 全局启动锁（GlobalLaunchLock 语义：忙 503 并点名持有者/时长） ──
+// ── 全局启动锁（GlobalLaunchLock 语义：忙 503 并点名持有者/时长。2026-10-12 起
+// "忙"= 有界等待 launchLockWaitMs 后仍被占才抛——持有者的正常窗口就是就绪等待
+// （≤10s），等待接力把"一个 ensure 失败放大成并行任务全部浏览器操作 skipped"
+// 的放大效应收敛为串行重试；等满窗口仍被占才按原文案忙抛） ──
+const DEFAULT_LAUNCH_LOCK_WAIT_MS = 12_000; // 就绪窗口(10s)+余量：正常持锁不超过它
+
 let lockHolder: string | null = null;
 let lockSince = 0;
 let lockChain: Promise<void> = Promise.resolve();
 
-async function withLaunchLock<T>(what: string, fn: () => Promise<T>): Promise<T> {
+function busyError(): BrowserBusyError {
+  const held = (Date.now() - lockSince) / 1000;
+  return new BrowserBusyError(
+    `Browser launch skipped: ${lockHolder} has held the global launch lock for ${held.toFixed(0)}s. Nothing is known to be wrong with this store — retry shortly; if it does not clear, restart the browser.`,
+  );
+}
+
+async function withLaunchLock<T>(what: string, fn: () => Promise<T>, waitMs: number = DEFAULT_LAUNCH_LOCK_WAIT_MS): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  while (lockHolder) {
+    if (Date.now() >= deadline) throw busyError();
+    // 链解析 = 当前持有者释放；期间换了持有者则下一轮继续等新链条
+    await Promise.race([lockChain, delay(Math.min(200, deadline - Date.now()))]);
+  }
   const prev = lockChain;
   let release: () => void;
   lockChain = new Promise<void>((r) => (release = r));
-  if (lockHolder) {
-    const held = (Date.now() - lockSince) / 1000;
-    release!();
-    lockChain = prev;
-    throw new BrowserBusyError(
-      `Browser launch skipped: ${lockHolder} has held the global launch lock for ${held.toFixed(0)}s. Nothing is known to be wrong with this store — retry shortly; if it does not clear, restart the browser.`,
-    );
-  }
   lockHolder = what;
   lockSince = Date.now();
   try {
@@ -104,19 +115,33 @@ function delay(ms: number): Promise<void> {
 const READINESS_POLL_MS = 250;
 const DEFAULT_READINESS_TIMEOUT_MS = 10_000; // Chrome 开 CDP 端口实测 ~2.3s，10s 留足余量
 
+/** 就绪超时文案（导出供测试钉分支）。进程秒退 = 单实例冲突指纹：老实例还占着同
+ * profile，新 spawn 被 Chrome 转发后立即退出、调试端口永不出现（2026-10-12 实测
+ * 事故）——给出与"还活着"不同的处置指引；stderr 日志路径两条都给，它是唯一现场证据。 */
+export function readinessTimeoutMessage(
+  pid: number | null | undefined,
+  timeoutMs: number,
+  exit: { code: number | string | null },
+  stderrLog: string,
+): string {
+  const head = `Chrome (pid ${pid ?? "unknown"}) did not expose its debugging port within ${timeoutMs}ms; browser session not started — `;
+  if (exit.code !== null) {
+    return `${head}the process exited immediately (exit ${exit.code}) — a leftover Chrome instance may be holding the same profile dir; close it (or restart the server, which now sweeps orphan browsers) and retry. stderr: ${stderrLog}`;
+  }
+  return `${head}inspect the Chrome process or retry the browse call. stderr: ${stderrLog}`;
+}
+
 /** ensure 慢路径的有界就绪等待（审查 Major2）：Chrome 开 CDP 端口实测 ~2.3s，spawn 即返回
  * 会让 agent 首次调用必败、快速重试时 startChrome 复用检查把"启动中"误判"死亡"→ kill 重拉
  * churn。只读轮询 cdpAlive（GET /json/version 探针，无任何副作用——PRD 4.2"绝不重试变异
- * 命令"铁律不受影响，探针不是命令重发）。就绪即返回；超时 throw 可操作错误（含 pid 与
- * 等待上限语义）；调用方 markSessionRow 保持"就绪后"时序，超时路径零假 running 行。 */
-async function waitForCdpReadiness(port: number, pid: number | null | undefined, fetchImpl: FetchImpl | undefined, timeoutMs: number): Promise<void> {
+ * 命令"铁律不受影响，探针不是命令重发）。就绪即返回；超时 throw 可操作错误（含 pid、
+ * 秒退指纹与 stderr 日志路径）；调用方 markSessionRow 保持"就绪后"时序，超时路径零假 running 行。 */
+async function waitForCdpReadiness(port: number, proc: ChildProcess | null, fetchImpl: FetchImpl | undefined, timeoutMs: number, stderrLog: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (await cdpAlive(port, fetchImpl)) return;
     if (Date.now() >= deadline) {
-      throw new Error(
-        `Chrome (pid ${pid ?? "unknown"}) did not expose its debugging port within ${timeoutMs}ms; browser session not started — inspect the Chrome process or retry the browse call.`,
-      );
+      throw new Error(readinessTimeoutMessage(proc?.pid ?? null, timeoutMs, { code: proc?.exitCode ?? proc?.signalCode ?? null }, stderrLog));
     }
     await delay(READINESS_POLL_MS);
   }
@@ -151,9 +176,15 @@ async function startChrome(key: string, opts: StartChromeOpts): Promise<ManagedS
     "--disable-features=DialMediaRouteProvider",
   ];
   if (opts.headless) args.push("--headless=new");
-  const proc = spawn(findChromeExecutable(), args, { detached: true, stdio: "ignore" });
+  // stderr 落盘（append）而非 stdio:"ignore"：Chrome 秒退/单实例转发的真实原因只在
+  // stderr 里（2026-10-12 事故零可观测的教训）。fd 直接交给子进程、父侧随即关闭——
+  // 不引入管道（detached + 管道会牵住父进程事件循环）。
+  const stderrLog = join(profileDir, "chrome-stderr.log");
+  const stderrFd = openSync(stderrLog, "a");
+  const proc = spawn(findChromeExecutable(), args, { detached: true, stdio: ["ignore", "ignore", stderrFd] });
   proc.unref();
-  const session: ManagedSession = { key, slug: opts.slug, proc, cdpPort: port, startedAt: Date.now(), lastUsedAt: Date.now() };
+  closeSync(stderrFd);
+  const session: ManagedSession = { key, slug: opts.slug, proc, cdpPort: port, stderrLog, startedAt: Date.now(), lastUsedAt: Date.now() };
   sessions.set(key, session);
   return session;
 }
@@ -164,6 +195,10 @@ export interface BrowserStarterDeps {
   fetchImpl?: FetchImpl;
   /** ensure* 慢路径 spawn 后的就绪等待上限，缺省 10_000ms（仅测试注入小值）。 */
   readinessTimeoutMs?: number;
+  /** 全局启动锁"忙"的有界等待上限，缺省 12_000ms（就绪窗口 10s + 余量）。 */
+  launchLockWaitMs?: number;
+  /** 孤儿浏览器进程扫杀（缺省按平台 powershell/pgrep 实现）；注入点供测试。 */
+  killOrphans?: (profileRoot: string) => number;
 }
 
 function markSessionRow(db: DatabaseSync, storeId: string, patch: { status: string; cdpPort?: number | null; chromePid?: number | null }): void {
@@ -192,8 +227,7 @@ export class BrowserStarter {
 
   /** 店铺浏览器：chrome → spawn；ziniao → ensure（+force 重拉）并落会话行。 */
   async startStoreSession(store: { id: string; name: string; browser_backend: string | null; ziniao_account_id: string | null }, headless: boolean, ziniaoCreds?: { socket_port: number; client_path: string; user_info: ZiniaoUserInfo } | null): Promise<void> {
-    await withLaunchLock(`start_session(${store.name})`, async () => {
-      if (store.browser_backend === "ziniao" && ziniaoCreds) {
+    await withLaunchLock(`start_session(${store.name})`, async () => {      if (store.browser_backend === "ziniao" && ziniaoCreds) {
         await ensureZiniaoRunning(ziniaoCreds.socket_port, ziniaoCreds.client_path, ziniaoCreds.user_info, this.deps.fetchImpl);
         markSessionRow(this.deps.db, store.id, { status: "running" });
         this.deps.db.prepare("UPDATE browser_sessions SET updated_at = ? WHERE store_id = ?").run(new Date().toISOString(), store.id);
@@ -202,14 +236,14 @@ export class BrowserStarter {
       // chrome（含未知后端的兜底）
       const session = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
       markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: session.cdpPort, chromePid: session.proc?.pid ?? null });
-    });
+    }, this.deps.launchLockWaitMs);
   }
 
   /** 店铺无关的 orchestrator web 浏览器（'_web'，进程内管理，无 browser_sessions 行）。 */
   async startWebSession(headless: boolean): Promise<void> {
     await withLaunchLock("start_web_session", async () => {
       await startChrome("_web", { slug: "_web", headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
-    });
+    }, this.deps.launchLockWaitMs);
   }
 
   /** AUX：登录无关 Chromium，返回 {ok, proxy_port, ws}（ws=Chrome DevTools 端点）。 */
@@ -249,10 +283,10 @@ export class BrowserStarter {
     if (alive !== null) return { cdpPort: alive };
     const session = await withLaunchLock(`ensure_session(${store.name})`, async () => {
       const s = await startChrome(store.id, { slug: storeSlugOf(store.name, store.id), headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
-      await waitForCdpReadiness(s.cdpPort!, s.proc?.pid, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
+      await waitForCdpReadiness(s.cdpPort!, s.proc, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, s.stderrLog);
       markSessionRow(this.deps.db, store.id, { status: "running", cdpPort: s.cdpPort, chromePid: s.proc?.pid ?? null });
       return s;
-    });
+    }, this.deps.launchLockWaitMs);
     return { cdpPort: session.cdpPort! };
   }
 
@@ -264,10 +298,10 @@ export class BrowserStarter {
     const session = await withLaunchLock("ensure_web_session", () =>
       startChrome("_web", { slug: "_web", headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl })
         .then(async (s) => {
-          await waitForCdpReadiness(s.cdpPort!, s.proc?.pid, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
+          await waitForCdpReadiness(s.cdpPort!, s.proc, this.deps.fetchImpl, this.deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, s.stderrLog);
           return s;
         }),
-    );
+    this.deps.launchLockWaitMs);
     return { cdpPort: session.cdpPort! };
   }
 
@@ -307,13 +341,59 @@ export class BrowserStarter {
     return stopped;
   }
 
-  /** 启动恢复：DB 里遗留 'running' 行（进程内状态已丢）复位 idle。 */
+  /** 启动恢复：①先按 profileRoot 扫杀孤儿浏览器进程——spawn 是 detached，服务死了
+   * Chrome 还活着、继续占着 browser_profiles 下的 user-data-dir；只复位行不杀进程的话，
+   * 恢复入队任务的第一次 spawn 就会被 Chrome 单实例机制转发即退、调试端口永不出现
+   * （2026-10-12 实测事故）。按命令行匹配 profileRoot：店铺会话有行、'_web' 无行，
+   * 路径匹配两者都覆盖。②再复位 DB 里遗留 'running' 行（进程内状态已丢）。
+   * 快路径：profileRoot 目录不存在 = 本机从未拉起过浏览器 → 不可能有孤儿，跳过进程
+   * 扫描（powershell/pgrep 有百 ms~秒级开销且 spawnSync 会冻结事件循环，测试里海量
+   * boot 因此零成本）。 */
   cleanupStaleSessions(): number {
+    if (existsSync(this.profileRoot)) {
+      try {
+        const killed = (this.deps.killOrphans ?? killOrphanBrowsersDefault)(this.profileRoot);
+        if (killed > 0) console.log(`[vibe-browser] swept ${killed} orphan browser process(es) under ${this.profileRoot}`);
+      } catch (e) {
+        // 扫杀失败不阻断启动（最坏退化为旧行为：残留实例占坑，任务首次浏览报错后可重试）
+        console.warn(`[vibe-browser] orphan browser sweep failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     const r = this.deps.db
       .prepare("UPDATE browser_sessions SET status = 'idle', cdp_port = NULL, chrome_pid = NULL, updated_at = ? WHERE status = 'running'")
       .run(new Date().toISOString());
     return Number(r.changes);
   }
+}
+
+// ── 孤儿浏览器进程扫杀（平台命令） ──
+
+/** 构造"杀掉命令行含 profileRoot 的 chrome/chromium 进程"的平台命令（导出供测试）。 */
+export function orphanKillCommand(profileRoot: string, platform: NodeJS.Platform = process.platform): { cmd: string; args: string[] } {
+  if (platform === "win32") {
+    // Contains() 而非 -like：路径里的 [] 等在 -like 语义里是通配符，.NET Contains 无此坑；
+    // 单引号双写是 PowerShell 字符串转义。
+    const esc = profileRoot.replace(/'/g, "''");
+    const script = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe' or Name='chromium.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${esc}') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Output $_.ProcessId }`;
+    return { cmd: "powershell", args: ["-NoProfile", "-Command", script] };
+  }
+  // pkill/pgrep 的模式是 ERE：路径里的 . 等元字符转义，避免误伤恰好含相似片段的无关进程
+  const pattern = profileRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { cmd: "pgrep", args: ["-f", pattern] };
+}
+
+/** 默认执行器：同步扫杀（boot 路径，先杀完再放行恢复入队的任务）。返回杀掉的进程数。 */
+function killOrphanBrowsersDefault(profileRoot: string): number {
+  const { cmd, args } = orphanKillCommand(profileRoot);
+  if (cmd === "pgrep") {
+    const found = spawnSync(cmd, args, { encoding: "utf8" });
+    const pids = (found.stdout ?? "").split(/\s+/).filter(Boolean);
+    if (pids.length === 0) return 0;
+    spawnSync("kill", ["-9", ...pids]);
+    return pids.length;
+  }
+  const out = spawnSync(cmd, args, { encoding: "utf8" });
+  return (out.stdout ?? "").split(/\s+/).filter(Boolean).length;
 }
 
 /** ziniao 强重启（force=true 路径复用）。 */
