@@ -73,7 +73,7 @@
 → 执行命令 → 返回
 ```
 
-**共享浏览器组（2026-10-12 修订）**：`stores.browser_config.share_group` 非空的店加入组——会话解析升级为**双 key**：连接 key = `shared:<组>`（同组共用一个 Chrome 进程 + 一个 user-data-dir `_shared-<组>`，一条浏览器级 ws，CDP flatten sessionId 天然多路复用，与"单客户端"裁决不冲突：连接仍只被本执行器独占）；tab 态 key = `shared:<组>::<store_id>`，并启用**标签所有权**（见 4.3）。路由层校验：share_group 须匹配 `[a-zA-Z0-9_-]{1,64}`（空串 = 退组），ziniao 店禁入组。`browser_sessions` 仍每店一行（组内多行共享同一 cdp_port/chrome_pid）；空闲清扫升级为组粒度（组内任一成员被活跃任务持有即豁免；杀掉后全成员行复位）。未入组店语义逐字不变。
+**共享浏览器组（2026-10-12 修订）**：`stores.browser_config.share_group` 非空的店加入组——会话解析升级为**双 key**：连接 key = `shared:<组>`（同组共用一个 Chrome 进程 + 一个 user-data-dir `_shared-<组>`，一条浏览器级 ws，CDP flatten sessionId 天然多路复用，与"单客户端"裁决不冲突：连接仍只被本执行器独占）；tab 态 key = `shared:<组>::<store_id>`，并启用**标签所有权**（见 4.3）。路由层校验：share_group 须匹配 `[a-zA-Z0-9_-]{1,64}`（空串 = 退组），ziniao 店禁入组。`browser_sessions` 仍每店一行（组内多行共享同一 cdp_port/chrome_pid）；空闲清扫升级为组粒度（组内任一成员被活跃任务持有即豁免；杀掉后全成员行复位）。未入组店语义逐字不变。**方案A（2026-10-12 追加）**：chrome 后端建店**缺省** `share_group="main"`（显式空串 = 独立店）——"多店一个浏览器"为缺省形态；PUT 的 browser_config 缺 share_group 键 = 保留现值（vendor 店铺表单整包回传只带 proxy 键，缺键保留防 UI 编辑静默退组）。
 
 ### 4.2 CDP 连接层（单客户端，无 mux）
 

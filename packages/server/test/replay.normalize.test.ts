@@ -80,6 +80,19 @@ describe("normalizeValue", () => {
 });
 
 describe("firstDiff", () => {
+  it("browser_config.share_group 两侧丢弃（方案A 缺省入组 = TS 有意扩展）；proxy_* 照常比较", () => {
+    // 录制侧（原版无此键）与 TS 侧（chrome 建店缺省注入 main）归一后必须等价
+    const original = normalizeValue({ browser_config: {} });
+    const tsSide = normalizeValue({ browser_config: { share_group: "main" } });
+    expect(original).toEqual(tsSide);
+    // 规则只钉 browser_config 内：对象其他位置的同名键原样比较
+    expect(normalizeValue({ share_group: "x" })).toEqual({ share_group: "x" });
+    // browser_config 其余键（proxy_*）照常深比
+    const a = normalizeValue({ browser_config: { proxy_server: "http://a" } });
+    const b = normalizeValue({ browser_config: { proxy_server: "http://b" } });
+    expect(firstDiff(a, b)).not.toBeNull();
+  });
+
   it("无差异返回 null", () => {
     expect(firstDiff({ a: 1, b: [2, 3] }, { a: 1, b: [2, 3] })).toBeNull();
   });

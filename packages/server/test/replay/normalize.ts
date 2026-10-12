@@ -12,6 +12,9 @@
 //   <dbsize>  *.db 文件的 size（SQLite 页布局跨实现必然不同；文本模板 size
 //             仍逐字节比较——那才是契约）
 //   <abspath> 绝对文件路径（Windows 盘符 / POSIX 两段以上；/api 路由除外）
+//   share_group（仅 browser_config 内）两侧丢弃——方案A（2026-10-12）TS 有意扩展：
+//             chrome 建店缺省入组 main，原版录制无此键；share_group 自身语义契约由
+//             tasks.test.ts 契约用例钉住，browser_config 其余键（proxy_*）照常深比
 // 键集合、数组长度、嵌套结构一律原样 deep-equal。
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -48,6 +51,8 @@ export function normalizeValue(value: unknown, key = ""): unknown {
     const dbEntry =
       typeof obj.path === "string" && /\.(db|db-journal|db-wal|db-shm)$/.test(obj.path) && typeof obj.size === "number";
     for (const [k, v] of Object.entries(obj)) {
+      // 方案A 有意分歧：browser_config.share_group 两侧丢弃（录制侧无此键、TS 侧缺省注入）
+      if (k === "share_group" && key === "browser_config") continue;
       out[k] = dbEntry && k === "size" ? "<dbsize>" : normalizeValue(v, k);
     }
     return out;

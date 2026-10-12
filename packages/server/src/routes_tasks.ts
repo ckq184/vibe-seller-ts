@@ -202,8 +202,12 @@ export function creatorNames(db: DatabaseSync, tasks: TaskRow[]): Map<string, st
 
 // ── 共享浏览器组（share_group）：browser_config.share_group 非空 = 该店加入组，
 // 与组内店铺共用一个 Chrome（key `shared:<组>` + 共享 user-data-dir，cookie 按域名
-// 隔离——只允许不同域名的店同组）。空串 = 显式退组；缺省 = 一店一浏览器（原语义）。 ──
+// 隔离——只允许不同域名的店同组）。空串 = 显式退组；缺省 = 一店一浏览器（原语义）。
+// 方案A（2026-10-12）：chrome 后端建店**缺省入组** DEFAULT_SHARE_GROUP——"多店共用
+// 一个 Chrome"是缺省形态，独立店显式传空串；PUT 的 browser_config 缺 share_group 键
+// = 保留现值（vendor 店铺表单整包回传只带 proxy 键，缺键保留防 UI 编辑静默退组）。 ──
 const SHARE_GROUP_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const DEFAULT_SHARE_GROUP = "main";
 
 function validateShareGroup(shareGroup: unknown, backend: string): void {
   if (shareGroup === undefined) return;
@@ -265,7 +269,11 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       platform_countries?: Record<string, string[]>;
     };
     if (!body.name) throw new HttpError(422, "name required");
-    validateShareGroup(body.browser_config?.["share_group"], body.browser_backend ?? "chrome");
+    const backend = body.browser_backend ?? "chrome";
+    // 方案A：chrome 建店缺省入组；显式空串 = 独立店；ziniao 恒不入组（校验层拒绝）
+    const effectiveConfig: Record<string, unknown> = { ...(body.browser_config ?? {}) };
+    if (backend === "chrome" && effectiveConfig["share_group"] === undefined) effectiveConfig["share_group"] = DEFAULT_SHARE_GROUP;
+    validateShareGroup(effectiveConfig["share_group"], backend);
     const id = crypto.randomUUID();
     const now = nowIso();
     db.prepare(
@@ -275,8 +283,8 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
     ).run(
       id,
       body.name,
-      body.browser_backend ?? "chrome",
-      JSON.stringify(body.browser_config ?? {}),
+      backend,
+      JSON.stringify(effectiveConfig),
       body.ziniao_account_id ?? null,
       body.browser_oauth ?? null,
       JSON.stringify(body.platforms ?? ["amazon"]),
@@ -327,7 +335,6 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       countries?: string[];
       platform_countries?: Record<string, string[]>;
     };
-    validateShareGroup(body.browser_config?.["share_group"], store.browser_backend);
     if (body.name !== undefined && body.name !== store.name) {
       const blocking = db
         .prepare("SELECT COUNT(*) AS n FROM tasks WHERE store_id = ? AND status IN ('designing','running','queued')")
@@ -356,8 +363,21 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       }
       db.prepare("UPDATE stores SET name = ? WHERE id = ?").run(body.name, storeId);
     }
-    if (body.browser_config !== undefined)
-      db.prepare("UPDATE stores SET browser_config = ? WHERE id = ?").run(JSON.stringify(body.browser_config), storeId);
+    if (body.browser_config !== undefined) {
+      validateShareGroup(body.browser_config["share_group"], store.browser_backend);
+      // share_group 键缺省 = 保留现值（vendor 店铺表单整包回传只带 proxy 键，缺键保留防
+      // UI 编辑静默退组）；显式空串 = 退组；显式组名 = 改组。其余键维持整包替换语义。
+      const next: Record<string, unknown> = { ...body.browser_config };
+      if (next["share_group"] === undefined) {
+        try {
+          const prev = store.browser_config ? (JSON.parse(store.browser_config) as Record<string, unknown>)["share_group"] : undefined;
+          if (prev !== undefined) next["share_group"] = prev;
+        } catch {
+          /* 现值坏 JSON 视作无组可保留 */
+        }
+      }
+      db.prepare("UPDATE stores SET browser_config = ? WHERE id = ?").run(JSON.stringify(next), storeId);
+    }
     if (body.platforms !== undefined)
       db.prepare("UPDATE stores SET platforms = ? WHERE id = ?").run(JSON.stringify(body.platforms), storeId);
     if (body.countries !== undefined)

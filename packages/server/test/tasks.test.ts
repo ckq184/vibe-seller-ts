@@ -57,7 +57,7 @@ describe("stores 契约", () => {
     expect(Object.keys(created).sort()).toEqual(
       ["browser_backend", "browser_config", "countries", "created_at", "id", "name", "platform_countries", "platforms", "updated_at", "ziniao_account_id", "browser_oauth"].sort(),
     );
-    expect(created).toMatchObject({ name: "Noon SG", browser_backend: "chrome", platforms: ["noon"], countries: ["SG"], platform_countries: { noon: ["SG"] }, browser_config: {} });
+    expect(created).toMatchObject({ name: "Noon SG", browser_backend: "chrome", platforms: ["noon"], countries: ["SG"], platform_countries: { noon: ["SG"] }, browser_config: { share_group: "main" } });
 
     const list = (await (await app.request("/api/stores", { headers: { cookie: adminCookie } })).json()) as unknown[];
     expect(list).toHaveLength(1);
@@ -103,6 +103,32 @@ describe("stores 契约", () => {
     // ziniao 店 browser_config 不带 share_group 的其他键不受影响（代理等原语义）
     const zProxy = await put(`/api/stores/${z.id}`, { browser_config: { proxy_server: "http://127.0.0.1:7890" } });
     expect(zProxy.status).toBe(200);
+  });
+
+  it("share_group 方案A：chrome 建店缺省入组 main（显式空串=独立店，ziniao 恒不入组）；PUT 缺 share_group 键=保留现值（防 vendor 表单整包回传误退组）", async () => {
+    // chrome 无 browser_config → 默认 main
+    const a = (await (await post("/api/stores", { name: "AutoGroup" })).json()) as { browser_config: Record<string, unknown> };
+    expect(a.browser_config).toEqual({ share_group: "main" });
+    // chrome 带 browser_config 但无 share_group 键 → 合并补默认（代理等键不受影响）
+    const b = (await (await post("/api/stores", { name: "AutoGroupProxy", browser_config: { proxy_server: "http://127.0.0.1:7890" } })).json()) as {
+      browser_config: Record<string, unknown>;
+    };
+    expect(b.browser_config).toEqual({ proxy_server: "http://127.0.0.1:7890", share_group: "main" });
+    // 显式空串 = 独立店（不补默认）
+    const c = (await (await post("/api/stores", { name: "SoloStore", browser_config: { share_group: "" } })).json()) as { browser_config: Record<string, unknown> };
+    expect(c.browser_config).toEqual({ share_group: "" });
+    // ziniao 恒不入组
+    const z = (await (await post("/api/stores", { name: "ZnNoGroup", browser_backend: "ziniao" })).json()) as { browser_config: Record<string, unknown> };
+    expect(z.browser_config).toEqual({});
+    // PUT：body 缺 share_group 键 → 保留现值，其余键整包替换
+    const d = (await (await post("/api/stores", { name: "KeepGroup" })).json()) as { id: string };
+    const kept = await put(`/api/stores/${d.id}`, { browser_config: { proxy_server: "http://p:1" } });
+    expect(((await kept.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ proxy_server: "http://p:1", share_group: "main" });
+    // PUT：显式空串 = 退组；完全不带 browser_config = 不动
+    const leave = await put(`/api/stores/${d.id}`, { browser_config: { share_group: "" } });
+    expect(((await leave.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ share_group: "" });
+    const untouched = await put(`/api/stores/${d.id}`, { platforms: ["shopee"] });
+    expect(((await untouched.json()) as { browser_config: Record<string, unknown> }).browser_config).toEqual({ share_group: "" });
   });
 
   it("有活跃任务的店铺不可删（409）；删除幂等返回 {ok:true}", async () => {
