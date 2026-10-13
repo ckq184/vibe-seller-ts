@@ -136,7 +136,7 @@ describe("stores 契约", () => {
 
   it("有活跃任务的店铺不可删（409）；删除幂等返回 {ok:true}", async () => {
     const store = (await (await post("/api/stores", { name: "Doomed" })).json()) as { id: string };
-    await post("/api/tasks", { store_id: store.id, title: "活跃任务", plan_mode: false });
+    await post("/api/tasks", { store_id: store.id, title: "活跃任务", plan_mode: false, defer_start: true });
     // 造一个 running 任务（直写 DB，队列属 4.3）
     deps.db.prepare("UPDATE tasks SET status = 'running' WHERE store_id = ?").run(store.id);
     const blocked = await app.request(`/api/stores/${store.id}`, { method: "DELETE", headers: { cookie: adminCookie } });
@@ -153,7 +153,7 @@ describe("stores 契约", () => {
 
 describe("tasks 契约", () => {
   it("创建默认值：pending、无 store 恒 plan_mode=true、profile 取用户默认；task_created 事件形状", async () => {
-    const created = (await (await post("/api/tasks", { title: "盘点任务" })).json()) as Record<string, unknown>;
+    const created = (await (await post("/api/tasks", { title: "盘点任务", defer_start: true })).json()) as Record<string, unknown>;
     expect(Object.keys(created).sort()).toEqual(
       ["ai_profile_id", "batch_id", "completed_at", "created_at", "created_by_name", "description", "error", "error_category", "id", "is_plan_only", "parent_task_id", "plan", "plan_history", "plan_mode", "platform", "country", "result", "review_gaps", "schedule_id", "session_id", "started_at", "status", "store_id", "submission_count", "submitted_result", "title", "todos", "updated_at", "wait_condition"].sort(),
     );
@@ -169,7 +169,7 @@ describe("tasks 契约", () => {
   it("有 store 任务：plan_mode 未指定取用户默认（false）；sub-task 无 store 400；坏 store 404", async () => {
     deps.db.prepare("UPDATE users SET plan_mode_default = 0 WHERE id = ?").run("00000000-0000-0000-0000-000000000001");
     const store = (await (await post("/api/stores", { name: "TaskStore" })).json()) as { id: string };
-    const t = (await (await post("/api/tasks", { store_id: store.id, title: "调价" })).json()) as Record<string, unknown>;
+    const t = (await (await post("/api/tasks", { store_id: store.id, title: "调价", defer_start: true })).json()) as Record<string, unknown>;
     expect(t.plan_mode).toBe(false);
     const sub = await post("/api/tasks", { title: "子任务", parent_task_id: t.id as string });
     expect(sub.status).toBe(400);
@@ -179,9 +179,9 @@ describe("tasks 契约", () => {
 
   it("list 过滤：store_id / __none__ / parent_task_id；按 created_at 倒序", async () => {
     const store = (await (await post("/api/stores", { name: "FilterStore" })).json()) as { id: string };
-    await post("/api/tasks", { store_id: store.id, title: "A" });
-    await post("/api/tasks", { store_id: store.id, title: "B" });
-    await post("/api/tasks", { title: "无店铺" });
+    await post("/api/tasks", { store_id: store.id, title: "A", defer_start: true });
+    await post("/api/tasks", { store_id: store.id, title: "B", defer_start: true });
+    await post("/api/tasks", { title: "无店铺", defer_start: true });
     const forStore = (await (await app.request(`/api/tasks?store_id=${store.id}`, { headers: { cookie: adminCookie } })).json()) as { title: string }[];
     expect(forStore.map((t) => t.title)).toEqual(["B", "A"]); // 倒序
     const none = (await (await app.request("/api/tasks?store_id=__none__", { headers: { cookie: adminCookie } })).json()) as { store_id: unknown }[];
@@ -189,7 +189,7 @@ describe("tasks 契约", () => {
   });
 
   it("删除守卫：running 409；终态可删且清依赖行（幂等 {ok:true}）", async () => {
-    const t = (await (await post("/api/tasks", { title: "删除我" })).json()) as { id: string };
+    const t = (await (await post("/api/tasks", { title: "删除我", defer_start: true })).json()) as { id: string };
     deps.db.prepare("UPDATE tasks SET status = 'running' WHERE id = ?").run(t.id);
     deps.db.prepare("INSERT INTO task_messages (id, task_id, role, content, seq, created_at) VALUES ('m1', ?, 'assistant', 'hi', 1, 'now')").run(t.id);
     const blocked = await app.request(`/api/tasks/${t.id}`, { method: "DELETE", headers: { cookie: adminCookie } });
@@ -204,7 +204,7 @@ describe("tasks 契约", () => {
   });
 
   it("steps 返回 TaskStepResponse 键；messages 排除 delta/thinking_delta 按 seq 排序", async () => {
-    const t = (await (await post("/api/tasks", { title: "带步骤" })).json()) as { id: string };
+    const t = (await (await post("/api/tasks", { title: "带步骤", defer_start: true })).json()) as { id: string };
     deps.db.prepare(
       "INSERT INTO task_steps (id, task_id, step_index, name, action_type, status, screenshot_id, error) VALUES ('s1', ?, 0, '截图', 'browse', 'done', NULL, NULL)",
     ).run(t.id);
@@ -221,14 +221,14 @@ describe("tasks 契约", () => {
   });
 
   it("review-plan：非 store 任务禁止关 plan 模式（400）；toggle 同步用户默认", async () => {
-    const t = (await (await post("/api/tasks", { title: "plan 任务" })).json()) as { id: string }; // 无 store → plan_mode true
+    const t = (await (await post("/api/tasks", { title: "plan 任务", defer_start: true })).json()) as { id: string }; // 无 store → plan_mode true
     const off = await app.request(`/api/tasks/${t.id}/review-plan`, { method: "PATCH", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ plan_mode: false }) });
     expect(off.status).toBe(400);
     expect(((await off.json()) as { detail: string }).detail).toBe("Non-store tasks require plan mode");
   });
 
   it("无引擎配置时启动 → engine_factory_failed 落 FAILED（绝不悬死）", async () => {
-    const t = (await (await post("/api/tasks", { title: "无引擎" })).json()) as { id: string };
+    const t = (await (await post("/api/tasks", { title: "无引擎", defer_start: true })).json()) as { id: string };
     const started = await (await post(`/api/tasks/${t.id}/start`, {})).json();
     expect(started).toMatchObject({ ok: true }); // 接受启动请求（编排器异步失败）
     const deadline = Date.now() + 4000;

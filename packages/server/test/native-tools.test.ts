@@ -266,10 +266,10 @@ describe("执行器逐工具：调用 → method/path/body 命中 → 结果形�
     expect(Array.isArray(r.result)).toBe(true);
   });
 
-  it("create_task：POST /api/tasks，未提供的可选键按 JSON 序列化丢弃（Python .get→null 的服务端等价）", async () => {
+  it("create_task：POST /api/tasks，未提供的可选键按 JSON 序列化丢弃（Python .get→null 的服务端等价）；defer_start 恒 true（agent 建的任务不自动起飞）", async () => {
     const calls: RecordedCall[] = [];
     const r = await exec(makePort(calls), "vibe_seller_create_task", { title: "拉清单" });
-    expect(calls[0]).toMatchObject({ method: "POST", path: "/api/tasks", body: { title: "拉清单" } });
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/api/tasks", body: { title: "拉清单", defer_start: true } });
     expect(r.status).toBe("success");
     expect(r.result).toMatchObject({ title: "拉清单", status: "pending" });
   });

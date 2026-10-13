@@ -114,7 +114,8 @@ const eventsOf = (name: string) => captured.filter((c) => c.event === name);
 const BASE_KEYS = ["app_locale", "app_version", "is_docker", "node_version", "os", "os_release"].sort();
 
 async function createTask(title: string, extra: Record<string, unknown> = {}): Promise<string> {
-  const created = (await (await post("/api/tasks", { title, ...extra })).json()) as { id: string };
+  // defer_start：本套件的启动全部由用例显式发起；创建即起飞见 task-auto-launch.test.ts
+  const created = (await (await post("/api/tasks", { title, defer_start: true, ...extra })).json()) as { id: string };
   return created.id;
 }
 

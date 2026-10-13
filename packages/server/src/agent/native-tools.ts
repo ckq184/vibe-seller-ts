@@ -851,8 +851,10 @@ function routeTool(name: string, a: Record<string, unknown>, taskId: string): Ro
       return { method: "GET", path: params.length ? `/api/tasks?${params.join("&")}` : "/api/tasks" };
     }
     case "vibe_seller_create_task":
-      // 未提供的可选键经 JSON 序列化丢弃；Python 发 null——服务端 Optional 字段两者同值
-      return { method: "POST", path: "/api/tasks", body: { title: req(a, "title"), store_id: a["store_id"], parent_task_id: a["parent_task_id"], description: a["description"] } };
+      // 未提供的可选键经 JSON 序列化丢弃；Python 发 null——服务端 Optional 字段两者同值。
+      // defer_start 恒 true：agent 建的任务/子任务不自动起飞（工具面没有启动任务的
+      // 工具，何时入队由编排方/调度器决定；自动起飞等于把扇出规模失控权交给模型）。
+      return { method: "POST", path: "/api/tasks", body: { title: req(a, "title"), store_id: a["store_id"], parent_task_id: a["parent_task_id"], description: a["description"], defer_start: true } };
     case "vibe_seller_list_cron_jobs":
       return { method: "GET", path: "/api/cron/jobs" };
     case "vibe_seller_add_cron_job":

@@ -489,8 +489,10 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       defer_start?: boolean;
     };
     if (!body.title) throw new HttpError(422, "title required");
+    // 创建即起飞要用 store 名（run prompt 的店铺上下文），存在性检查与取名合并
+    let store: { id: string; name: string } | null = null;
     if (body.store_id) {
-      const store = db.prepare("SELECT id FROM stores WHERE id = ?").get(body.store_id);
+      store = (db.prepare("SELECT id, name FROM stores WHERE id = ?").get(body.store_id) as { id: string; name: string } | undefined) ?? null;
       if (!store) throw new HttpError(404, "Store not found");
     }
     if (body.parent_task_id && !body.store_id) throw new HttpError(400, "Sub-tasks must have a store_id");
@@ -553,8 +555,23 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       description_length_bucket: telemetry.lengthBucket((row.description ?? "").length),
       created_by_role: user.role,
     });
-    // defer_start / 执行编排（队列→agent）留 4.3：任务停在 pending
-    void body.defer_start;
+    // 创建即起飞：defer_start 缺省/false 时把 agent 拉起来（对齐 vendor 前端契约——
+    // submitCreateTask 无附件时期望服务端负责 launch，frontend/src/__tests__/
+    // submitCreateTaskAttachments.test.ts「no files → launches normally」）。
+    // 三条不在此列：defer_start=true（附件路径，文件须先上传再启动，由前端上传
+    // 完成后调 /start 续跑）；schedule_id（入队时机归调度器 fanout）；
+    // parent_task_id（子任务何时入队归编排方）。
+    if (body.defer_start !== true && !body.schedule_id && !body.parent_task_id) {
+      if (planMode) {
+        // 先审核模式：进设计阶段（等价 POST /:id/design 的入口语义）
+        orchestrator.transition(id, "designing");
+        void orchestrator.start(id, { mode: "design", store, profileId });
+      } else {
+        // 自动模式：入队或直启（等价 POST /:id/start）。queueWhenSaturated：
+        // 创建路径没有 409 的 UI 出口，饱和时进队而不是把任务静默留在 pending。
+        orchestrator.enqueueOrLaunch(id, { mode: "execute", store, profileId, queueWhenSaturated: true });
+      }
+    }
     // 原create_task 返回 ORM task 经 response_model 序列化——created_by_name 保持
     // 模型缺省 None（带 creator 名的 payload 只用于 SSE 广播，routers/tasks.py:187-216）。
     return c.json({ ...payload, created_by_name: null });

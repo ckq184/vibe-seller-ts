@@ -324,8 +324,8 @@ describe("fire 路径", () => {
     const { body } = await createSchedule({ title: "游标", schedule_type: "days" });
     deps.db.prepare("UPDATE schedules SET plan_status = 'ready', plan = 'x', plan_version = 1 WHERE id = ?").run(body.id);
     const created = (await (await post("/api/tasks", { title: "定时活", schedule_id: body.id })).json()) as { id: string };
-    // 无 schedule_id 的任务拒绝
-    const plain = (await (await post("/api/tasks", { title: "散活" })).json()) as { id: string };
+    // 无 schedule_id 的任务拒绝（defer_start：本套件只管路由形状，起飞归 task-auto-launch 契约）
+    const plain = (await (await post("/api/tasks", { title: "散活", defer_start: true })).json()) as { id: string };
     expect((await put(`/api/tasks/${plain.id}/schedule-state/last_cursor`, { value: "1" })).status).toBe(400);
 
     const bad = await put(`/api/tasks/${created.id}/schedule-state/bad key!`, { value: "1" });
@@ -366,7 +366,7 @@ describe("fire 路径", () => {
 
 describe("ad-declaration", () => {
   it("声明 → 形状 + AD_TASK.json 镜像；同回合只能收窄/升格；新用户消息开新相", async () => {
-    const created = (await (await post("/api/tasks", { title: "广告活" })).json()) as { id: string };
+    const created = (await (await post("/api/tasks", { title: "广告活", defer_start: true })).json()) as { id: string };
     const decl = await post(`/api/tasks/${created.id}/ad-declaration`, { kind: "investigate", scope: { combos: [{ platform: "Amazon", country: "ae" }], junk: 1 } });
     expect(decl.status).toBe(200);
     const first = (await decl.json()) as { seq: number; kind: string; scope: { combos: { platform: string; country: string }[] }; user_turn: number };

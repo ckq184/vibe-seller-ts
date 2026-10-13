@@ -81,7 +81,9 @@ const post = (path: string, body?: unknown) =>
 const getJson = async (path: string) => (await (await app.request(path, { headers: { cookie: adminCookie } })).json()) as Record<string, unknown>;
 
 async function createTask(title: string, extra: Record<string, unknown> = {}): Promise<string> {
-  const created = (await (await post("/api/tasks", { title, ...extra })).json()) as { id: string };
+  // defer_start：本套件的启动全部由用例显式发起（/start、/design、/messages）；
+  // 「创建即起飞」的契约由 task-auto-launch.test.ts 专项钉守
+  const created = (await (await post("/api/tasks", { title, defer_start: true, ...extra })).json()) as { id: string };
   return created.id;
 }
 
