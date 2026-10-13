@@ -498,6 +498,17 @@ export function recoverTasksFromDb(deps: SchedulerDeps): { resumed: number; mark
     const store = t.store_id
       ? (deps.db.prepare("SELECT id, name FROM stores WHERE id = ?").get(t.store_id) as { id: string; name: string } | undefined) ?? null
       : null;
+    // 先审核任务还没出方案 → 先进设计阶段等人工确认，不直接执行（2026-10-13
+    // 实测：恢复曾把 plan_mode=1、未出方案的 pending 任务按 execute 跑完，用户
+    // 没看到任何方案卡）。设计入口等价 POST /design，与 /start、/messages 的
+    // planPhaseActive 推导对齐。
+    if (Number(t.plan_mode) && !t.plan) {
+      if (deps.orchestrator.transition(t.id, "designing")) {
+        void deps.orchestrator.start(t.id, { mode: "design", store });
+        resumed += 1;
+      }
+      continue;
+    }
     const result = deps.orchestrator.enqueueOrLaunch(t.id, {
       mode: t.plan && Number(t.plan_mode) ? "plan_execute" : "execute",
       store,

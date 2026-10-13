@@ -654,13 +654,23 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       ? (db.prepare("SELECT id, name FROM stores WHERE id = ?").get(String(task.store_id)) as { id: string; name: string } | undefined)
       : null;
     if (task.store_id && !store) throw new HttpError(404, "Store not found");
-    const result = orchestrator.enqueueOrLaunch(taskId, {
-      mode: task.plan && task.plan_mode ? "plan_execute" : "execute",
-      store: store ?? null,
-      history: historyFor(taskId),
-      profileId: (task.ai_profile_id as string | null) ?? (user.default_profile_id as string | null) ?? undefined,
-    });
-    if (result === "rejected") throw new HttpError(409, "Agent concurrency saturated");
+    const profileId = (task.ai_profile_id as string | null) ?? (user.default_profile_id as string | null) ?? undefined;
+    // 先审核任务还没出方案 → 先进设计阶段等人工确认，不直接执行（2026-10-13
+    // 实测：重启恢复把 plan_mode=1、未出方案的任务按 execute 跑完，用户没看到
+    // 任何方案卡）。设计入口等价 POST /design：队列路径的转移目标是
+    // queued/running，设计阶段的任务必须活在 designing 状态。
+    if (Number(task.plan_mode) && !task.plan) {
+      orchestrator.transition(taskId, "designing");
+      void orchestrator.start(taskId, { mode: "design", store: store ?? null, history: historyFor(taskId), profileId });
+    } else {
+      const result = orchestrator.enqueueOrLaunch(taskId, {
+        mode: task.plan && task.plan_mode ? "plan_execute" : "execute",
+        store: store ?? null,
+        history: historyFor(taskId),
+        profileId,
+      });
+      if (result === "rejected") throw new HttpError(409, "Agent concurrency saturated");
+    }
     const row = db.prepare("SELECT status FROM tasks WHERE id = ?").get(taskId) as { status: string };
     return c.json({ ok: true, task_id: taskId, status: row.status });
   });

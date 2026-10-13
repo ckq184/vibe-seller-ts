@@ -9,6 +9,7 @@ Task → Context → 模型决策 → 工具动作 → 观察 → 状态推进 �
 ## 功能
 
 - **真实模型驱动的任务 Agent**：接一个 Anthropic Messages 兼容端点（StepFun / GLM / Kimi / DeepSeek 等 9 家预设），对店铺建任务，agent 用原生工具完成"调研 → 计划 → 执行 → 回填结果"闭环；plan-only 设计任务、cron 定时调度、多店 fanout 均支持。
+- **任务生命周期**：新建即起飞——无附件时创建后立即开始（先审核模式先出方案、人工确认后执行；自动模式直接执行）；带附件时先上传附件再启动。服务重启会把 pending/queued 任务重新恢复执行（原版 `task_queue._recover_from_db` 语义，调度器/批次任务的崩溃安全网）；已知限制：带附件的任务在上传窗口内遭遇重启会丢附件启动（defer 意图不落库，恢复路径无法区分）。
 - **27 个原生工具**：任务/店铺/日程管理、workspace 读写、邮件（自研 IMAP/SMTP）、企业微信机器人、事件（dida365 / Google Calendar）、图片生成（vision，人工确认卡）、以及 **5 个浏览器工具**（navigate / tabs / read / act / eval——裸 CDP 驱动本机 Chrome，操作卖家中心页面完成"导航 → 读取 → 回填"）。
 - **确认闸门**：把任意工具名加入 `VIBE_BRIDGE_GATED_TOOLS`，agent 调用即挂起等人工批准/拒绝（默认拒绝），前端一键批复；图片生成天然带确认卡。
 - **多供应商 profiles**：UI 管理多套模型配置，改档免重启热切换，密钥不出本机、绝不入日志/事件。

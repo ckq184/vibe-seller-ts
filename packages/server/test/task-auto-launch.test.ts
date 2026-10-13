@@ -150,6 +150,26 @@ describe("创建即起飞（defer_start 缺省/false）", () => {
   });
 });
 
+describe("手动 /start 的 mode 推导", () => {
+  it("先审核任务未出方案 → 进设计阶段等确认，不绕过方案审核", async () => {
+    // 2026-10-13 实测：/start 曾把 plan_mode=1、未出方案的任务按 execute 直接
+    // 跑完（重启恢复同款推导）。修后：无方案的先审核任务先进 designing。
+    const created = (await (await post("/api/tasks", { title: "手动-先审核", defer_start: true })).json()) as { id: string };
+    const started = (await (await post(`/api/tasks/${created.id}/start`, {})).json()) as { ok: boolean; status: string };
+    expect(started).toMatchObject({ ok: true, status: "designing" });
+    await waitFor(() => (statusOf(created.id) === "planned" ? "planned" : undefined));
+    expect((deps.db.prepare("SELECT plan, result FROM tasks WHERE id = ?").get(created.id) as { plan: string | null; result: string | null }).plan).toBe("空脚本");
+  });
+
+  it("先审核任务带方案 → plan_execute 直接跑完", async () => {
+    const created = (await (await post("/api/tasks", { title: "手动-带方案", defer_start: true })).json()) as { id: string };
+    deps.db.prepare("UPDATE tasks SET plan = ? WHERE id = ?").run("既定方案", created.id);
+    const started = (await (await post(`/api/tasks/${created.id}/start`, {})).json()) as { ok: boolean; status: string };
+    expect(started).toMatchObject({ ok: true, status: "running" });
+    await waitFor(() => (statusOf(created.id) === "completed" ? "completed" : undefined));
+  });
+});
+
 describe("不自动起飞的路径（显式 defer / 调度器 / 子任务）", () => {
   it("defer_start=true → 停在 pending，task_created 之后没有 task_update", async () => {
     const created = (await (await post("/api/tasks", { title: "不起飞-附件", defer_start: true })).json()) as { id: string };

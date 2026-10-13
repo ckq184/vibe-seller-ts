@@ -18,6 +18,7 @@ let dir: string;
 let deps: AppDeps;
 let app: ReturnType<typeof createApp>;
 let adminCookie: string;
+let storeId: string;
 
 const HAPPY: Decision[] = [
   { kind: "call_tool", intent: { name: "vibe_seller_list_stores", arguments: {} } },
@@ -69,6 +70,11 @@ beforeAll(async () => {
   app = createApp(deps);
   const res = await app.request("/api/auth/login", { method: "POST", body: JSON.stringify({ identifier: "admin", password: "admin" }), headers: { "content-type": "application/json" } });
   adminCookie = res.headers.get("set-cookie")!.split(";")[0]!;
+  // 执行链路用自动模式店铺任务驱动：/start 对"未出方案的先审核任务"现已进
+  // 设计阶段（2026-10-13 修复，不绕过方案审核），execute 编排改由
+  // plan_mode=false 的店铺任务进入（无店铺任务恒 plan_mode，见 create 守卫）。
+  const storeRes = await app.request("/api/stores", { method: "POST", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ name: "编排店" }) });
+  storeId = ((await storeRes.json()) as { id: string }).id;
 });
 
 afterAll(async () => {
@@ -82,8 +88,10 @@ const getJson = async (path: string) => (await (await app.request(path, { header
 
 async function createTask(title: string, extra: Record<string, unknown> = {}): Promise<string> {
   // defer_start：本套件的启动全部由用例显式发起（/start、/design、/messages）；
-  // 「创建即起飞」的契约由 task-auto-launch.test.ts 专项钉守
-  const created = (await (await post("/api/tasks", { title, defer_start: true, ...extra })).json()) as { id: string };
+  // 「创建即起飞」的契约由 task-auto-launch.test.ts 专项钉守。store_id +
+  // plan_mode=false：/start 的 execute 分支只对自动模式任务开放（先审核任务
+  // 未出方案时进设计阶段，见 task-auto-launch.test.ts 的 /start 用例）。
+  const created = (await (await post("/api/tasks", { title, store_id: storeId, plan_mode: false, defer_start: true, ...extra })).json()) as { id: string };
   return created.id;
 }
 
@@ -233,8 +241,7 @@ describe("编排 e2e", () => {
     expect(messages.some((m) => m.role === "user" && m.content === "再帮我看看")).toBe(true);
   });
 
-  it("并发饱和：无店铺任务在 maxConcurrent=0 类饱和下 409（诚实拒绝）", async () => {
-    // maxConcurrent=4 未饱和时直接启动；这里验证重复启动守卫
+  it("重复启动：run 活着再 /agent/start → 409（诚实拒绝）", async () => {
     const taskId = await createTask("重复启动");
     engines.set(taskId, { decisions: GATED, gated: ["update_price"] });
     await post(`/api/tasks/${taskId}/start`);

@@ -188,6 +188,9 @@ describe("事件面：task_created / task_completed / task_failed / task_resumed
     captured.length = 0; // 就地清空（stub 客户端持有同一数组引用，不可重新赋值）
     const taskId = await createTask("完成流");
     engines.set(taskId, { decisions: HAPPY_WITH_TOOL });
+    // 先审核任务带方案 → /start 走 plan_execute（execute 分支由 orchestrator e2e 的
+    // 自动模式店铺任务覆盖；未出方案的先审核任务进设计阶段，见 task-auto-launch.test.ts）
+    deps.db.prepare("UPDATE tasks SET plan = ? WHERE id = ?").run("脚本方案", taskId);
     await post(`/api/tasks/${taskId}/start`);
     await waitFor(() => {
       const row = deps.db.prepare("SELECT status FROM tasks WHERE id = ?").get(taskId) as { status: string } | undefined;

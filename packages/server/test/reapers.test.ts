@@ -335,4 +335,28 @@ describe("启动恢复（task_queue._recover_from_db）", () => {
     recoverTasksFromDb(sched);
     expect((deps.db.prepare("SELECT status FROM browser_sessions").all() as unknown as { status: string }[]).every((s) => s.status === "idle")).toBe(true);
   });
+
+  it("恢复时先审核任务未出方案 → 进设计阶段（不绕过方案审核）；带方案 → plan_execute；自动模式 → execute", async () => {
+    // 2026-10-13 实测：重启恢复曾把 plan_mode=1、未出方案的 pending 任务按
+    // execute 直接跑完，用户没看到任何方案卡。恢复与 /start 的 mode 推导必须
+    // 与 /messages 的 planPhaseActive 对齐：无方案的先审核任务先进 designing。
+    const freshPlan = insertTask({ title: "重启前待设计", status: "pending", plan_mode: 1, plan: null });
+    const withPlan = insertTask({ title: "重启前待执行", status: "queued", plan_mode: 1, plan: "既定方案" });
+    const auto = insertTask({ title: "重启前自动任务", status: "pending", plan_mode: 0 });
+    engines.set(freshPlan, { decisions: [{ kind: "respond", content: "设计方案" }] });
+    engines.set(withPlan, { decisions: [{ kind: "respond", content: "按方案执行完" }] });
+    engines.set(auto, { decisions: [{ kind: "respond", content: "自动跑完" }] });
+
+    const result = recoverTasksFromDb(sched);
+    expect(result.resumed).toBeGreaterThanOrEqual(3);
+    // 无方案的先审核任务：同步转移即落在 designing，不是 running
+    expect((deps.db.prepare("SELECT status FROM tasks WHERE id = ?").get(freshPlan) as { status: string }).status).toBe("designing");
+    await waitFor(() => {
+      const s = (id: string) => (deps.db.prepare("SELECT status FROM tasks WHERE id = ?").get(id) as { status: string } | undefined)?.status;
+      return s(freshPlan) === "planned" && s(withPlan) === "completed" && s(auto) === "completed" ? true : undefined;
+    });
+    // 设计阶段的产物落成方案（result 由 outcome 裁决统一落稿，两者都不是执行产物）
+    const row = deps.db.prepare("SELECT plan FROM tasks WHERE id = ?").get(freshPlan) as { plan: string | null };
+    expect(row.plan).toBe("设计方案");
+  });
 });
