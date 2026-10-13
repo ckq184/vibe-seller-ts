@@ -167,6 +167,46 @@ describe("手动 /start 的 mode 推导", () => {
     const started = (await (await post(`/api/tasks/${created.id}/start`, {})).json()) as { ok: boolean; status: string };
     expect(started).toMatchObject({ ok: true, status: "running" });
     await waitFor(() => (statusOf(created.id) === "completed" ? "completed" : undefined));
+    // 落库用户消息带「已批准的计划」段 = plan_execute（execute 是 free-run；
+    // mode header 被 orchestrator 剥掉只存正文，两者 status 转移同形）
+    expect(messagesOf(created.id)[0]!.content).toContain("已批准的计划");
+    expect(messagesOf(created.id)[0]!.content).toContain("既定方案");
+  });
+});
+
+describe("重试 /retry 的 mode 推导", () => {
+  /** 造一个失败任务（RETRIABLE 含 failed），供重试用例驱动。 */
+  const failTask = async (title: string, patch: Record<string, unknown> = {}): Promise<string> => {
+    const created = (await (await post("/api/tasks", { title, defer_start: true })).json()) as { id: string };
+    const sets = Object.entries(patch).map(([k, v]) => `${k} = ?`).join(", ");
+    deps.db.prepare(`UPDATE tasks SET status = 'failed', error = 'boom', error_category = 'runtime_error'${sets ? ", " + sets : ""} WHERE id = ?`)
+      .run(...(Object.values(patch) as never[]), created.id);
+    return created.id;
+  };
+
+  it("重试未出方案的先审核任务 → 回设计阶段，不绕过方案审核", async () => {
+    // 2026-10-13：/retry 曾硬编码 mode=execute，重跑 fresh plan 任务直接执行
+    const taskId = await failTask("重试-先审核");
+    const retried = (await (await post(`/api/tasks/${taskId}/retry`, {})).json()) as { ok: boolean; status: string };
+    expect(retried).toMatchObject({ ok: true, status: "designing" });
+    await waitFor(() => (statusOf(taskId) === "planned" ? "planned" : undefined));
+    const row = deps.db.prepare("SELECT plan FROM tasks WHERE id = ?").get(taskId) as { plan: string | null };
+    expect(row.plan).toBe("空脚本");
+    // agent_done 的 mode 钉死这是设计跑（execute/plan_execute 都报 "execute"）
+    const done = deps.bus.history.filter((h) => h.type === "agent_done" && h.data["task_id"] === taskId).at(-1);
+    expect(done?.data["mode"]).toBe("plan_then_execute");
+  });
+
+  it("重试带方案的先审核任务 → plan_execute 重跑既定方案（不是 free-run）", async () => {
+    const taskId = await failTask("重试-带方案", { plan: "既定方案" });
+    const retried = (await (await post(`/api/tasks/${taskId}/retry`, {})).json()) as { ok: boolean; status: string };
+    expect(retried).toMatchObject({ ok: true, status: "running" });
+    await waitFor(() => (statusOf(taskId) === "completed" ? "completed" : undefined));
+    // 方案列保留（retry 不清 plan）；落库用户消息带「已批准的计划」段 =
+    // plan_execute，不是 execute 的 free-run（两者 status 转移同形）
+    expect((deps.db.prepare("SELECT plan FROM tasks WHERE id = ?").get(taskId) as { plan: string | null }).plan).toBe("既定方案");
+    expect(messagesOf(taskId)[0]!.content).toContain("已批准的计划");
+    expect(messagesOf(taskId)[0]!.content).toContain("既定方案");
   });
 });
 

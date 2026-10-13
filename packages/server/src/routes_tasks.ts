@@ -745,8 +745,20 @@ export function registerTaskRoutes(app: Hono, deps: TaskDeps): void {
       `UPDATE tasks SET result = NULL, accepted_result = NULL, submitted_result = NULL, review_gaps = NULL,
        transcript_tail = NULL, error = NULL, error_category = NULL, submission_count = 0, updated_at = ? WHERE id = ?`,
     ).run(new Date().toISOString(), taskId);
-    const result = orchestrator.enqueueOrLaunch(taskId, { mode: "execute", history: historyFor(taskId), profileId });
-    if (result === "rejected") throw new HttpError(409, "Agent concurrency saturated");
+    // mode 推导与 /start、recoverTasksFromDb 对齐（曾硬编码 execute）：先审核
+    // 任务未出方案 → 回设计阶段重新出方案（retry 不清 plan 列，带方案时
+    // plan_execute 重跑既定方案，而不是忽略已审方案的 free-run）。
+    if (Number(task.plan_mode) && !task.plan) {
+      orchestrator.transition(taskId, "designing");
+      void orchestrator.start(taskId, { mode: "design", history: historyFor(taskId), profileId });
+    } else {
+      const result = orchestrator.enqueueOrLaunch(taskId, {
+        mode: task.plan && task.plan_mode ? "plan_execute" : "execute",
+        history: historyFor(taskId),
+        profileId,
+      });
+      if (result === "rejected") throw new HttpError(409, "Agent concurrency saturated");
+    }
     const row = db.prepare("SELECT status FROM tasks WHERE id = ?").get(taskId) as { status: string };
     return c.json({ ok: true, task_id: taskId, status: row.status, profile_id: profileId });
   });
