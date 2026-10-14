@@ -340,9 +340,11 @@ describe("启动恢复（task_queue._recover_from_db）", () => {
     // 2026-10-13 实测：重启恢复曾把 plan_mode=1、未出方案的 pending 任务按
     // execute 直接跑完，用户没看到任何方案卡。恢复与 /start 的 mode 推导必须
     // 与 /messages 的 planPhaseActive 对齐：无方案的先审核任务先进 designing。
-    const freshPlan = insertTask({ title: "重启前待设计", status: "pending", plan_mode: 1, plan: null });
+    // schedule_id：无调度的 pending 不再被恢复（见下一条否定用例），本用例的
+    // pending 夹具建模调度火源插入→入队之间的崩溃瞬态窗（fire.ts/finalize）。
+    const freshPlan = insertTask({ title: "重启前待设计", status: "pending", plan_mode: 1, plan: null, schedule_id: crypto.randomUUID() });
     const withPlan = insertTask({ title: "重启前待执行", status: "queued", plan_mode: 1, plan: "既定方案" });
-    const auto = insertTask({ title: "重启前自动任务", status: "pending", plan_mode: 0 });
+    const auto = insertTask({ title: "重启前自动任务", status: "pending", plan_mode: 0, schedule_id: crypto.randomUUID() });
     engines.set(freshPlan, { decisions: [{ kind: "respond", content: "设计方案" }] });
     engines.set(withPlan, { decisions: [{ kind: "respond", content: "按方案执行完" }] });
     engines.set(auto, { decisions: [{ kind: "respond", content: "自动跑完" }] });
@@ -358,5 +360,25 @@ describe("启动恢复（task_queue._recover_from_db）", () => {
     // 设计阶段的产物落成方案（result 由 outcome 裁决统一落稿，两者都不是执行产物）
     const row = deps.db.prepare("SELECT plan FROM tasks WHERE id = ?").get(freshPlan) as { plan: string | null };
     expect(row.plan).toBe("设计方案");
+  });
+
+  it("无调度的 pending 不被恢复：附件上传中/agent 子任务/显式 defer 停在原地等 owner", async () => {
+    // 恢复只捞"在管道里的"（queued 任意 + 带调度的 pending/planned 瞬态与冻结），
+    // 从未被启动过的无调度 pending（defer_start 附件路径、agent 工具建的子任务）
+    // 归属其 owner：前端上传完会调 /start，子任务由人工经 API 启动。曾把这类
+    // 任务一并捞跑——附件上传窗口内重启会丢附件启动（submitCreateTask 踩过两次
+    // 的坑），子任务扇出失控。
+    const deferred = insertTask({ title: "附件上传中", status: "pending", plan_mode: 0 });
+    const subtask = insertTask({ title: "agent 建的子任务", status: "pending", plan_mode: 0, parent_task_id: crypto.randomUUID() });
+    engines.set(deferred, { decisions: [{ kind: "respond", content: "不该跑" }] });
+    engines.set(subtask, { decisions: [{ kind: "respond", content: "不该跑" }] });
+
+    const result = recoverTasksFromDb(sched);
+    await new Promise((r) => setTimeout(r, 150)); // 给任何误恢复留出异步窗口
+    for (const id of [deferred, subtask]) {
+      expect((deps.db.prepare("SELECT status FROM tasks WHERE id = ?").get(id) as { status: string }).status).toBe("pending");
+      expect(deps.db.prepare("SELECT COUNT(*) AS n FROM task_messages WHERE task_id = ?").get(id)).toMatchObject({ n: 0 });
+    }
+    expect(result.marked).toBe(0); // 没有 running/designing 需要终局
   });
 });

@@ -485,12 +485,17 @@ export function recoverTasksFromDb(deps: SchedulerDeps): { resumed: number; mark
     marked += 1;
   }
 
-  // 重排队：QUEUED/PENDING + 调度产生的 PLANNED（交互式 plan 任务仍等人按 Run）
+  // 重排队：只捞"在管道里的"——queued 任意（队列里排着的）+ 带调度的
+  // pending/planned（火源插入→入队之间的崩溃瞬态窗、调度冻结计划）。无调度
+  // 的 pending 是"从未被启动过的"（defer_start 附件路径、agent 工具建的子任务
+  // ——工具面恒 defer），归属其 owner：前端上传完会调 /start，子任务由人工经
+  // API 启动；恢复曾把它们一并捞跑，附件上传窗口内重启丢附件启动、子任务扇出
+  // 失控（创建即起飞落地后，正常创建不会停留 pending，该区分是确定性的）。
   let resumed = 0;
   const requeue = deps.db
     .prepare(
       `SELECT id, store_id, plan, plan_mode FROM tasks
-       WHERE status IN ('queued','pending') OR (status = 'planned' AND schedule_id IS NOT NULL)
+       WHERE status = 'queued' OR (status IN ('pending','planned') AND schedule_id IS NOT NULL)
        ORDER BY created_at`,
     )
     .all() as unknown as { id: string; store_id: string | null; plan: string | null; plan_mode: number | null }[];
