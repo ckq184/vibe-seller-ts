@@ -22,7 +22,7 @@ import { pathToFileURL } from "node:url";
 
 // 与仓库内目录保持一致；存在性守卫覆盖门禁③④两个 hook
 const HOOKS_PATH = "scripts/githooks";
-const REQUIRED_HOOKS = ["commit-msg", "pre-commit"];
+export const REQUIRED_HOOKS = ["commit-msg", "pre-commit"];
 
 function gitOut(args, cwd) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8" });

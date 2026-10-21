@@ -8,8 +8,8 @@
 // 自写扫描覆盖面窄但确定性强、完全 TDD 可钉、离线可用）。
 //
 // 规格锚点（PRD §四）：
-//   - 扫描对象：staged Added/Modified（`git diff --cached --raw -z` 取 status/mode/
-//     blob sha；Deleted 跳过——索引里已无内容；gitlink（mode 160000，嵌入式仓指针）
+//   - 扫描对象：staged Added/Modified（`git diff --cached --raw --no-abbrev -z` 取 status/mode/
+//     全量 blob sha；Deleted 跳过——索引里已无内容；gitlink（mode 160000，嵌入式仓指针）
 //     跳过——不是文本对象；二进制跳过——numstat "-" 或内容含 NUL/替换符）。
 //     内容经一次 `git cat-file --batch` 读取（spawn 次数与文件数无关）。只看 staged，
 //     不扫 unstaged/未跟踪（PRD §六.5）。
@@ -175,10 +175,18 @@ function gitRun(args, cwd, encoding) {
 // `<sha> blob <len>\n<content>\n` 解析——审查 Major3：逐文件 git show 的进程创建开销
 // ~85ms/文件，121 文件即 10s 级 pre-commit；batch 化后 spawn 次数与文件数无关）。
 // 对象缺失（理论不可达：sha 来自 --raw 自身）fail-closed 报错。
+// staged 文本总量超 maxBuffer（ENOBUFS）同样 fail-closed，改报中文可操作提示（路线4 S10a）。
 function batchReadBlobs(shas, cwd) {
   if (shas.length === 0) return { contents: [] };
   const input = shas.map((s) => s + "\n").join("");
   const r = spawnSync("git", ["cat-file", "--batch"], { cwd, input, maxBuffer: 64 * 1024 * 1024 });
+  if (r.error?.code === "ENOBUFS") {
+    return {
+      error:
+        "staged 文本总量超过 64MB 扫描上限（ENOBUFS）。请分批提交：先 git restore --staged <部分文件> " +
+        "移出暂存区，提交其余文件后再 git add 并提交这部分",
+    };
+  }
   if (r.error || r.status !== 0) {
     return { error: r.stderr?.toString() || r.error?.message || `exit=${r.status}` };
   }
@@ -216,9 +224,10 @@ export function main(argv, { cwd = process.cwd(), allowlistPath } = {}) {
   }
 
   // staged 清单：--raw -z 一次拿 status/mode/sha/path（--no-renames 拆 D+A 免解析
-  // R 带分数的 -z 形状）。Deleted 跳过（索引里已无内容）；gitlink（dstMode 160000，
-  // 嵌入式仓指针）跳过——`git show :path` 对其报 bad object（审查 Major2）。
-  const raw = gitRun(["diff", "--cached", "--raw", "--no-renames", "-z"], cwd, "utf8");
+  // R 带分数的 -z 形状；--no-abbrev 取全量 sha，不受 core.abbrev 截短，路线4 S11）。
+  // Deleted 跳过（索引里已无内容）；gitlink（dstMode 160000，嵌入式仓指针）跳过——
+  // `git show :path` 对其报 bad object（审查 Major2）。
+  const raw = gitRun(["diff", "--cached", "--raw", "--no-renames", "--no-abbrev", "-z"], cwd, "utf8");
   if (raw.error || raw.status !== 0) {
     console.error(`[pre-commit secret 扫描] 运行错误：git diff --cached 失败：${raw.stderr || raw.error?.message || `exit=${raw.status}`}（cwd=${cwd}，须在 git 仓库内执行）`);
     return 2;

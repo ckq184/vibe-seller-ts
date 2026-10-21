@@ -17,7 +17,7 @@
 //     scripts/githooks/secret-allowlist.json 逐条登记（re 同时匹配测试行与 JSON 行自身）；
 //   - 需要"不被放行"的拦截路径假密钥（sk-LIVE…）用字符串拼接构造
 //     （"sk-" + "LIVE…"），源行不构成模式命中，故无需 allowlist。
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -84,6 +84,20 @@ function mkTemp(withGit) {
 // 直 spawn（node + 参数数组，不经 shell）；cwd = 目标仓（hook 内 git 命令按 cwd 取 staged）
 function runNode(script, args, cwd) {
   return spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8" });
+}
+
+// runNode 的异步版：等待期间让出事件循环。本文件全是同步 spawn，整文件同步段在全套并行下
+// 超过 60s 会撞 vitest worker RPC 超时（onTaskUpdate），重载用例改走本函数（路线4 S10a）
+function runNodeAsync(script, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script, ...args], { cwd });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (d) => (stdout += d));
+    child.stderr.setEncoding("utf8").on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 // 写提交信息文件（UTF-8）并用 -F 提交（绕开 Windows 命令行中文参数编码变量）
@@ -429,6 +443,36 @@ describe("CLI 集成", () => {
     expect(out).toMatch(/另有 2 个二进制\/删除\/gitlink 变更已跳过扫描/);
   }, 30_000);
 
+  it("staged 文本总量超 64MB（ENOBUFS）→ exit 2，中文提示含上限与分批提交指引（路线4 S10a）", async () => {
+    const dir = mkTemp(true);
+    // 约 68MB 纯文本（680000 行 × 100 字节），不含任何密钥模式
+    writeFileSync(join(dir, "big.txt"), ("x".repeat(99) + "\n").repeat(680_000), "utf8");
+    git(dir, "add", "big.txt");
+    const r = await runNodeAsync(cliPath, [], dir);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("分批提交");
+    expect(r.stderr).toContain("64MB");
+    expect(r.stderr).not.toContain("spawnSync git ENOBUFS");
+  }, 60_000);
+
+  it("staged 清单取全量 sha：diff --cached --raw 调用带 --no-abbrev（路线4 S11，GIT_TRACE 参数级断言）", () => {
+    const dir = mkTemp(true);
+    writeFileSync(join(dir, "ok.txt"), "clean\n", "utf8");
+    git(dir, "add", "ok.txt");
+    const tracePath = join(mkTemp(false), "git-trace.log");
+    const r = spawnSync(process.execPath, [cliPath], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TRACE: tracePath },
+    });
+    expect(r.status).toBe(0);
+    const rawCalls = readFileSync(tracePath, "utf8")
+      .split(/\r?\n/)
+      .filter((l) => l.includes("diff --cached --raw"));
+    expect(rawCalls.length).toBeGreaterThan(0); // 防空真：确实捕获到这次调用
+    for (const l of rawCalls) expect(l).toContain("--no-abbrev");
+  }, 30_000);
+
   it("allowlist 缺失 → 照常扫描（缺失=零放行）", () => {
     const dir = mkTemp(true);
     writeFileSync(join(dir, "leak.txt"), `token = ${BLOCKED_SK}\n`, "utf8");
@@ -528,6 +572,27 @@ describe("真仓集成：core.hooksPath 指向本仓 scripts/githooks", () => {
     git(dir, "rm", "leak.txt");
     const r = commitWithMessage(dir, "feat: 删除含密钥文件并新增干净文件\n");
     expect(r.status).toBe(0);
+  }, 30_000);
+
+  it("只扫 staged：工作区脏改 + 未跟踪文件含密钥、staged 干净 → 放行；stage 脏改后被拦（路线4 S14，PRD §六.5）", () => {
+    const dir = withHooks(mkTemp(true));
+    writeFileSync(join(dir, "tracked.txt"), "base\n", "utf8");
+    git(dir, "add", "tracked.txt");
+    expect(commitWithMessage(dir, "feat: 干净基线\n").status).toBe(0);
+    // staged = 干净修改；工作区在其上再追加密钥行（不 stage）+ 未跟踪密钥文件
+    writeFileSync(join(dir, "tracked.txt"), "base\nclean change\n", "utf8");
+    git(dir, "add", "tracked.txt");
+    writeFileSync(join(dir, "tracked.txt"), `base\nclean change\nconst t = "${BLOCKED_SK}";\n`, "utf8");
+    writeFileSync(join(dir, "untracked.txt"), `token = ${BLOCKED_SK}\n`, "utf8");
+    const status = git(dir, "status", "--porcelain");
+    expect(status).toContain("MM tracked.txt");
+    expect(status).toContain("?? untracked.txt");
+    expect(commitWithMessage(dir, "feat: staged 干净的修改\n").status).toBe(0);
+    // 对照：stage 脏改后同一密钥被拦（证明放行不是空真）
+    git(dir, "add", "tracked.txt");
+    const r = commitWithMessage(dir, "feat: stage 后应被拦截\n");
+    expect(r.status).not.toBe(0);
+    expect(r.stdout + r.stderr).toContain("[stepfun-openai-sk]");
   }, 30_000);
 
   it("对照组：--no-verify 能提交带密钥内容（PRD §六.2 明示取舍：hook 层不防绕过，防绕过靠代码质量审查核对 diff）", () => {

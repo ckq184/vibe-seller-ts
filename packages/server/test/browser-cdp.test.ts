@@ -322,6 +322,15 @@ describe("CdpConnection.overPort：装配", () => {
       }),
     ).rejects.toThrow(/browser session not ready on port 9227.*upgrade rejected/s);
   });
+
+  it("/json/version HTTP 200 但 body 非 JSON → 同前缀 + 非 JSON 语义（路线4 S10b / 路线2 台账 #11）", async () => {
+    await expect(
+      CdpConnection.overPort(9228, {
+        fetchImpl: (async () => new Response("<html>not json</html>", { status: 200 })) as typeof fetch,
+        transportFactory: async () => new FakeCdpTransport(),
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9228.*非 JSON/s);
+  });
 });
 
 // ── createWebSocketTransport：open 前失败必须 settle（审查 Major1：会话键防砖化）──

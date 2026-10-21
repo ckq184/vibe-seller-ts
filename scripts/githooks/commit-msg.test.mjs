@@ -15,12 +15,13 @@
 // 临时仓用 local config 内联身份并关 autocrlf/gpgsign，不依赖全局 git 配置；
 // 提交信息一律走 -F 文件（UTF-8），绕开 Windows 命令行中文参数编码变量。
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
+import { REQUIRED_HOOKS } from "../hooks-install.mjs";
 import { main, validateCommitMessage } from "./commit-msg.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -229,6 +230,22 @@ describe("CLI 集成：node commit-msg.mjs <msgfile>", () => {
     expect(r.stderr).toContain("空");
   });
 
+  it("带一个前导 UTF-8 BOM 的合法 message → 退出 0（路线4 S12：剥一个 BOM 后校验）", () => {
+    const dir = mkTemp(false);
+    const f = join(dir, "msg.txt");
+    writeFileSync(f, "\uFEFFfeat: 带 BOM 的合法消息\n");
+    expect(runNode(cliPath, [f], dir).status).toBe(0);
+  });
+
+  it("剥 BOM 不洗白：BOM + 未知类型 → 1；两个前导 BOM 只剥一个 → 1（路线4 S12）", () => {
+    const dir = mkTemp(false);
+    const f = join(dir, "msg.txt");
+    writeFileSync(f, "\uFEFFupdate: 不在白名单\n");
+    expect(runNode(cliPath, [f], dir).status).toBe(1);
+    writeFileSync(f, "\uFEFF\uFEFFfeat: 两个前导 BOM\n");
+    expect(runNode(cliPath, [f], dir).status).toBe(1);
+  });
+
   it("缺 <msgfile> 参数 → 退出 2 并提示用法", () => {
     const r = runNode(cliPath, [], mkTemp(false));
     expect(r.status).toBe(2);
@@ -304,6 +321,14 @@ describe("hooks-install：幂等安装（temp 真仓）", () => {
   it("非 git 目录 → 退出 2", () => {
     const r = runNode(installerPath, [], mkTemp(false));
     expect(r.status).toBe(2);
+  });
+
+  it("清单一致性：scripts/githooks/ 下无扩展名的 hook 文件全部登记在 REQUIRED_HOOKS（路线4 S13：防新增 hook 忘登记）", () => {
+    const hookFiles = readdirSync(here, { withFileTypes: true })
+      .filter((e) => e.isFile() && !e.name.includes("."))
+      .map((e) => e.name);
+    expect(hookFiles.length).toBeGreaterThan(0); // 防空真
+    for (const name of hookFiles) expect(REQUIRED_HOOKS, name).toContain(name);
   });
 });
 

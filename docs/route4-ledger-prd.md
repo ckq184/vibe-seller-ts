@@ -1,6 +1,6 @@
 # 路线 4 PRD：遗留台账攒批清理（第一批）
 
-> **版本**：v1.1（2026-10-21；v1.0 为 2026-10-10，差异见 §五 修订记录，冲突时以 §五 为准）
+> **版本**：v1.2（2026-10-21；v1.0 为 2026-10-10，v1.1 / v1.2 差异见 §五 修订记录，冲突时以 §五 为准，新版本优先）
 > **规格来源**：`docs/roadmap.md` 路线 4 + `docs/审查记录.md` 各批台账（4.7 / Phase 5 / 路线 1 观察项 / 路线 2 十一项 / 路线 3 七项）。
 > **启动依据**：用户指令"攒批清台账（路线 4）"。原 roadmap 建议"真实使用一个月后清"，用户选择现在清——以本 PRD 的范围裁决消化该提前量：**只做确定性可验、收益明确的小项；需要真实使用反馈或参考仓库对证环境的留台账**。
 > **需求采访说明**：每项的出处与现状都在台账有据；对照参考实现核实的项（S2）以 `_reference/vibe-seller-src` 为准。实现中发现某项与原实现行为冲突或不可行，按变更授权停报该项（不影响同批其他项）。
@@ -69,6 +69,19 @@
 | T4 | 双重审查 + 整改 + 文档回写 + 落档 | T3 commit |
 
 ## 五、修订记录
+
+### v1.2（2026-10-21）
+
+T3 动工前对照 HEAD `407aaa8` 逐项核对（临时仓实测，仓库未动），以下差异经用户批准生效。S10–S12 改动 git hooks 校验逻辑、S13 给安装器加导出，属 AGENTS.md 敏感区⑤ / 宪法第 6 条，用户已在本会话单独批准 T3 修改 `scan-secrets.mjs`、`commit-msg.mjs`、`hooks-install.mjs`（仅加 `export`）。T3 回滚点 / verify base = `407aaa8`（T2 之后的交接文档提交）。
+
+| 项 | v1.1 | v1.2 | 依据 |
+|---|---|---|---|
+| S10 | ENOBUFS 与 `resp.json()` 解析失败都映射为中文提示 | 拆成两半。(a) ENOBUFS（路线 3 台账 #1）：scan-secrets 一次读取全部 staged 文本时超过 64MB 上限，现提示为英文技术码（68MB 实测 `spawnSync git ENOBUFS`，exit 2）；改为中文可操作提示（含 64MB 上限与"分批提交"指引），exit 2 不变。(b) `resp.json()` 不在 scan-secrets 里，出自路线 2 台账 #11（`browser/cdp.ts` overPort 对 HTTP 200 但非 JSON 的响应未包前缀文案），v1.0 误并入 S10；按 PRD 原意一并修：补上与 overPort 其余失败路径同形的 `browser session not ready on port <port>` 前缀，不中文化 | T3 核对 + 用户批准 |
+| S11 | 加 `--no-abbrev` | 照做。实测默认输出 7 位短 sha，但 git 会自动加长到唯一，cat-file 遇到歧义也会 fail-closed，外部行为与全量 sha 不可区分，属加固。测试用 `GIT_TRACE` 断言 `diff --raw` 那次调用带 `--no-abbrev`（参数级断言） | T3 核对 + 用户批准 |
+| S12 | 剥一个前导 `\uFEFF` | 只在校验时剥（`main` 读文件后），不回写提交信息文件。实测带 BOM 的消息被误拒（JS 的 `\s` 含 U+FEFF，报"行首无类型词元"）；git 会把 BOM 原样写进提交 subject，放行后这类提交的 subject 开头仍有一个不可见的 BOM，接受 | T3 核对 + 用户批准 |
+| S13 | 断言 hook 文件集合 ⊆ REQUIRED_HOOKS | "hook 文件"定义为 `scripts/githooks/` 下没有扩展名的常规文件；`REQUIRED_HOOKS` 原未导出，`hooks-install.mjs` 只加 `export`，逻辑不变 | T3 核对 + 用户批准 |
+
+S14 核对确认行为已成立（工作区脏改 + 未跟踪密钥、staged 干净时放行；对照组 stage 脏改后被拦），按 v1.0 补回归钉，无差异。
 
 ### v1.1（2026-10-21）
 

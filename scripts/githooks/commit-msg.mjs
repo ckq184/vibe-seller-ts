@@ -83,7 +83,9 @@ export function validateCommitMessage(firstLine) {
 }
 
 // CLI/共享入口：argv[2] = 提交信息文件（git commit-msg hook 传入 $1）。
-// 只读首行校验（PRD §三：多行 message 只看首行）。
+// 只读首行校验（PRD §三：多行 message 只看首行）。读入后剥一个前导 UTF-8 BOM
+// （路线4 S12：某些 Windows 编辑器会写，JS 的 \s 含 U+FEFF 致误判"行首无类型词元"）；
+// 只用于校验，不回写提交信息文件。
 // 返回退出码：0 通过 / 1 格式拒绝 / 2 用法或运行错误。
 export function main(argv) {
   const file = argv[2];
@@ -100,7 +102,7 @@ export function main(argv) {
     return 2;
   }
 
-  const firstLine = content.split(/\r?\n/, 1)[0] ?? "";
+  const firstLine = content.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] ?? "";
   const { ok, errors } = validateCommitMessage(firstLine);
   if (ok) return 0;
 
