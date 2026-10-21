@@ -562,6 +562,53 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     expect(listed.tabs.length).toBe(12);
     expect(listed.tabs.find((t) => t.tab_id === "t13")?.active).toBe(true); // 新 tab 仍在且活跃
   });
+
+  it("系统时间回拨后新开 tab → 仍关最久未用的非活跃 tab，绝不关刚开的新 tab（路线4 审查 M1）", async () => {
+    // 墙钟作 LRU 值时：12 个 tab 都按真实时刻记过，回拨 1 小时后新开的 t13 时刻最小 → 被立即驱逐
+    const twelve = Array.from({ length: 12 }, (_, i) => pageInfo(`t${String(i + 1).padStart(2, "0")}`, `https://x/${i + 1}`));
+    let list = [...twelve];
+    server.on("Target.getTargets", () => ({ targetInfos: list }));
+    server.onResult("Target.attachToTarget", { sessionId: "sess-1" });
+    server.on("Runtime.evaluate", (f) => {
+      const expr = (f.params as { expression: string }).expression;
+      if (expr.includes("location.href")) return { result: { value: JSON.stringify({ href: "https://x.example/", title: "T" }) } };
+      return { result: { value: "body" } };
+    });
+
+    // 1) navigate：活跃 = t01
+    const p1 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example" });
+    await until(() => server.fake.frames("Page.navigate").length === 1, "first navigate");
+    server.fire("Page.loadEventFired", {}, "sess-1");
+    await p1;
+
+    // 2) read 显式寻址 t02..t12 各一次，再 read t02 → 12 个 tab 都被用过；
+    //    使用序 = t01(活跃) < t03 < t04 < … < t12 < t02
+    for (let i = 2; i <= 12; i++) {
+      await toolkit.execute("vibe_seller_browser_read", { mode: "text", tab_id: `t${String(i).padStart(2, "0")}` });
+    }
+    await toolkit.execute("vibe_seller_browser_read", { mode: "text", tab_id: "t02" });
+
+    // 3) 系统时间回拨 1 小时后 new_tab 第 13 个：最久未用的非活跃 = t03（t01 活跃豁免）
+    const realNow = Date.now;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() - 3_600_000);
+    try {
+      server.onResult("Target.createTarget", { targetId: "t13" });
+      list = [...twelve, pageInfo("t13", "about:blank")];
+      const p2 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example/new", new_tab: true });
+      await until(() => server.fake.frames("Target.closeTarget").length === 1, "closeTarget frame");
+      const closedId = String((server.fake.frames("Target.closeTarget")[0]!.params as { targetId: string }).targetId);
+      list = list.filter((t) => t.targetId !== closedId);
+      await until(() => server.fake.frames("Page.navigate").length === 2, "second navigate");
+      server.fire("Page.loadEventFired", {}, "sess-1");
+      const r2 = (await p2) as { tab_id: string };
+
+      expect(closedId).toBe("t03");
+      expect(server.fake.frames("Target.closeTarget").length).toBe(1);
+      expect(r2.tab_id).toBe("t13");
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ── read（PRD §二：info/text/html + max_chars 截断） ──

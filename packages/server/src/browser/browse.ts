@@ -84,7 +84,7 @@ const connecting = new Map<string, Promise<CdpConnection>>();
 /** per-key tab 态（PRD §4.3）：活跃 tab + LRU；共享组会话另带 owned 标签所有权。 */
 interface TabState {
   activeTargetId: string | null;
-  /** LRU：Map 插入序 = 最久未用在前；值 = 最近使用时刻。 */
+  /** LRU：Map 插入序 = 最久未用在前；值 = 最近使用序号（模块级单调计数，不用墙钟——路线4 审查 M1）。 */
   lru: Map<string, number>;
   /** 标签所有权（仅共享组会话启用）：本店开出的 targetId 集合；null = 非共享
    *（保留 targets[0] 收养与"列表=全浏览器"的 legacy 语义）。 */
@@ -136,10 +136,13 @@ function tabStateOf(key: string): TabState {
   return s;
 }
 
+/** LRU 使用序号源：单调递增，系统时间回拨不影响新旧次序（路线4 审查 M1）。 */
+let lruSeq = 0;
+
 function touchTab(key: string, targetId: string): void {
   const s = tabStateOf(key);
   s.lru.delete(targetId); // 删除再插入 = 移到 LRU 尾（最新）
-  s.lru.set(targetId, Date.now());
+  s.lru.set(targetId, ++lruSeq);
 }
 
 async function getConnection(key: string, port: number, deps?: CdpConnectionDeps): Promise<CdpConnection> {
@@ -252,7 +255,7 @@ async function resolveTargetId(
   return { targetId: explicit, targets };
 }
 
-/** 驱逐候选序：按最近使用时刻升序（未跟踪 tab 记 0 = 最旧在前；同值保持 Map 插入序——
+/** 驱逐候选序：按最近使用序号升序（未跟踪 tab 记 0 = 最旧在前；同值保持 Map 插入序——
  * sort 稳定）。不能直接按 Map 插入序：未跟踪 tab 是后追加的，会排到刚开的新 tab 之后。 */
 function evictionOrder(lru: Map<string, number>): string[] {
   return [...lru].sort((a, b) => a[1] - b[1]).map(([tid]) => tid);

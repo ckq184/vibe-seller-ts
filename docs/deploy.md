@@ -94,7 +94,7 @@ stop.bat    :: 停止
 | `ADMIN_PASSWORD` | `admin` | 首启 admin 种子密码 |
 | `ADMIN_EMAIL` | `admin@vibe-seller.local` | 首启 admin 种子邮箱 |
 | `VIBE_SELLER_TELEMETRY` | 未设 | 设为 `0` 关闭匿名遥测 |
-| `VIBE_VERSION` | `0.0.0+dev` | `/api/version` 上报覆盖（一般不用设；遥测 app_version 取包内 `package.json` 的 `0.1.0`） |
+| `VIBE_VERSION` | 包内 `package.json` 的 version | 覆盖 `/api/health`、`/api/version`、`/api/system/info` 上报的版本号（一般不用设）；遥测 app_version 恒取包内 `package.json`，不受此项影响 |
 | `NODE_ZIP`（仅打包时） | 无 | 指定官方 node win-x64 zip，解压嵌入 `node/node.exe` |
 
 ## 6. 相关脚本速查

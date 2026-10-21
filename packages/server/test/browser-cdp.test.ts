@@ -331,6 +331,15 @@ describe("CdpConnection.overPort：装配", () => {
       }),
     ).rejects.toThrow(/browser session not ready on port 9228.*非 JSON/s);
   });
+
+  it("/json/version HTTP 200 但 body 为 JSON null → 同前缀，不抛裸 TypeError（路线4 审查 M4）", async () => {
+    await expect(
+      CdpConnection.overPort(9229, {
+        fetchImpl: (async () => new Response("null", { status: 200 })) as typeof fetch,
+        transportFactory: async () => new FakeCdpTransport(),
+      }),
+    ).rejects.toThrow(/browser session not ready on port 9229/);
+  });
 });
 
 // ── createWebSocketTransport：open 前失败必须 settle（审查 Major1：会话键防砖化）──

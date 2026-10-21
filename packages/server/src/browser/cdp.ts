@@ -126,15 +126,15 @@ export class CdpConnection {
       throw new Error(`browser session not ready on port ${port}: CDP /json/version unreachable (${reason})`);
     }
     if (!resp.ok) throw new Error(`browser session not ready on port ${port}: CDP /json/version HTTP ${resp.status}`);
-    let info: { webSocketDebuggerUrl?: string };
+    let info: { webSocketDebuggerUrl?: string } | null;
     try {
-      info = (await resp.json()) as { webSocketDebuggerUrl?: string };
+      info = (await resp.json()) as { webSocketDebuggerUrl?: string } | null;
     } catch (err) {
       // HTTP 200 但 body 非 JSON 同样包前缀（路线4 S10b），不抛裸 SyntaxError
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(`browser session not ready on port ${port}: CDP /json/version 返回非 JSON (${reason})`);
     }
-    const wsUrl = info.webSocketDebuggerUrl;
+    const wsUrl = info?.webSocketDebuggerUrl; // JSON null 同走"未返回"分支，不抛裸 TypeError（路线4 审查 M4）
     if (!wsUrl) throw new Error(`browser session not ready on port ${port}: CDP /json/version 未返回 webSocketDebuggerUrl`);
     let transport: CdpTransport;
     try {
