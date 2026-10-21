@@ -32,7 +32,8 @@ export const BROWSE_TOOL_NAMES = [
 
 export type BrowseToolName = (typeof BROWSE_TOOL_NAMES)[number];
 
-function isBrowseToolName(name: string): name is BrowseToolName {
+/** browse 工具名判定（单一来源：执行器入口与 native-tools 的可见性/拦截面共用）。 */
+export function isBrowseToolName(name: string): name is BrowseToolName {
   return (BROWSE_TOOL_NAMES as readonly string[]).includes(name);
 }
 
@@ -251,6 +252,12 @@ async function resolveTargetId(
   return { targetId: explicit, targets };
 }
 
+/** 驱逐候选序：按最近使用时刻升序（未跟踪 tab 记 0 = 最旧在前；同值保持 Map 插入序——
+ * sort 稳定）。不能直接按 Map 插入序：未跟踪 tab 是后追加的，会排到刚开的新 tab 之后。 */
+function evictionOrder(lru: Map<string, number>): string[] {
+  return [...lru].sort((a, b) => a[1] - b[1]).map(([tid]) => tid);
+}
+
 /** tab LRU（PRD §4.3）：新开 tab 后页型数超 12 → 关最久未用的非活跃；永不关最后一个页型 tab。
  * 共享组：上限只数**本店 owned 且存活**的 tab、只关 owned——绝不波及他店标签。 */
 async function enforceTabCap(conn: CdpConnection, ctx: SessionCtx): Promise<void> {
@@ -267,7 +274,7 @@ async function enforceTabCap(conn: CdpConnection, ctx: SessionCtx): Promise<void
       alive += 1;
       if (!state.lru.has(t.targetId)) state.lru.set(t.targetId, 0);
     }
-    for (const [tid] of [...state.lru]) {
+    for (const tid of evictionOrder(state.lru)) {
       if (alive <= TAB_CAP || alive <= 1) break; // 永不关本店最后一个 owned tab
       if (tid === state.activeTargetId) continue; // 活跃豁免（即使它 LRU 最旧）
       if (!state.owned?.has(tid)) continue; // 防御：LRU 理论只含 owned，仍不碰非 owned
@@ -286,7 +293,7 @@ async function enforceTabCap(conn: CdpConnection, ctx: SessionCtx): Promise<void
     if (!state.lru.has(t.targetId)) state.lru.set(t.targetId, 0); // 未知 tab 视作最旧候选
   }
   let alive = targets.length;
-  for (const [tid] of [...state.lru]) {
+  for (const tid of evictionOrder(state.lru)) {
     if (alive <= TAB_CAP || alive <= 1) break; // 永不关最后一个页型 tab
     if (tid === state.activeTargetId) continue; // 活跃豁免（即使它 LRU 最旧）
     await conn.closeTarget(tid);
@@ -357,6 +364,13 @@ async function centerOf(conn: CdpConnection, sessionId: string, action: string, 
     throw new Error(`act ${action} failed: no element matches selector ${JSON.stringify(selector)}.`);
   }
   return { x: v.x, y: v.y };
+}
+
+/** 坐标左键单击：mouseMoved → mousePressed → mouseReleased（click 与 type 聚焦共用的单处实现）。 */
+async function clickAt(conn: CdpConnection, sessionId: string, x: number, y: number): Promise<void> {
+  await conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, { sessionId });
+  await conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }, { sessionId });
+  await conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }, { sessionId });
 }
 
 /** press 支持键的小映射表（key/code/windowsVirtualKeyCode/text）。 */
@@ -582,9 +596,10 @@ export class BrowseToolkit {
     } catch {
       // href/title 取不到不致命（如 load 超时的慢页面）：返回请求 url 与空 title
     }
-    if (ctx.storeId !== null) {
-      // store 会话 navigate 成功后落 current_url（列已存在，纯 UPDATE，无 schema 变更，PRD §4.3；
-      // 共享组按调用店落自己的行——组内每店一行）
+    if (ctx.storeId !== null && loaded) {
+      // store 会话 navigate 载入成功后落 current_url（列已存在，纯 UPDATE，无 schema 变更，PRD §4.3；
+      // 共享组按调用店落自己的行——组内每店一行）。load 超时不落：evaluate 可能命中旧页，
+      // 会把旧 URL 记成新 URL
       this.deps.db
         .prepare("UPDATE browser_sessions SET current_url = ?, updated_at = ? WHERE store_id = ?")
         .run(finalUrl, new Date().toISOString(), ctx.storeId);
@@ -710,10 +725,11 @@ export class BrowseToolkit {
       case "click":
       case "hover": {
         const { x, y } = await centerOf(conn, sessionId, action, requireSelector(args, action));
-        await conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, { sessionId });
-        if (action === "hover") return { ok: true, action, x, y };
-        await conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }, { sessionId });
-        await conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }, { sessionId });
+        if (action === "hover") {
+          await conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, { sessionId });
+          return { ok: true, action, x, y };
+        }
+        await clickAt(conn, sessionId, x, y);
         return { ok: true, action, x, y };
       }
       case "type": {
@@ -723,9 +739,7 @@ export class BrowseToolkit {
         if (selector) {
           // 聚焦目标走 click 同路径（PRD §4.4）
           const { x, y } = await centerOf(conn, sessionId, action, selector);
-          await conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, { sessionId });
-          await conn.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }, { sessionId });
-          await conn.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }, { sessionId });
+          await clickAt(conn, sessionId, x, y);
         }
         await conn.send("Input.insertText", { text }, { sessionId });
         return { ok: true, action, length: text.length };

@@ -323,6 +323,23 @@ describe("navigate", () => {
     expect(r.load_state).toBe("timeout");
   });
 
+  it("load 超时 → 不落 current_url（evaluate 可能命中旧页，旧 URL 不得记成新 URL；台账 S7）", async () => {
+    db.prepare("UPDATE browser_sessions SET current_url = 'https://prev.example/kept' WHERE store_id = 'st-ch'").run();
+    server.onResult("Target.getTargets", { targetInfos: [] });
+    server.onResult("Target.createTarget", { targetId: "t-new" });
+    server.onResult("Target.attachToTarget", { sessionId: "sess-1" });
+    // 超时后 evaluate 命中的仍是旧页
+    server.on("Runtime.evaluate", () => ({ result: { value: JSON.stringify({ href: "https://stale.example/", title: "" }) } }));
+    const r = (await toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example" })) as {
+      load_state: string;
+    };
+    expect(r.load_state).toBe("timeout");
+    const row = db.prepare("SELECT current_url FROM browser_sessions WHERE store_id = 'st-ch'").get() as {
+      current_url: string | null;
+    };
+    expect(row.current_url).toBe("https://prev.example/kept");
+  });
+
   it("scheme 非 http/https → throw（file:// 不进导航），且不碰 starter / 不发任何 CDP 帧", async () => {
     await expect(toolkit.execute("vibe_seller_browser_navigate", { url: "file:///C:/Windows/win.ini" })).rejects.toThrow(
       /http/i,
@@ -485,8 +502,9 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     // 2) read 显式寻址 t05 → touch t05（比 t01 更新；t01 成为 LRU 最旧但它是活跃）
     await toolkit.execute("vibe_seller_browser_read", { mode: "text", tab_id: "t05" });
 
-    // 3) new_tab 第 13 个 → LRU 顺序：t01(活跃,最旧) < t05 < t13 < t02..t04,t06..t12(未跟踪,ts=0)
-    //    最旧非活跃 = t05 → 关 t05；t01 活跃豁免（此刻活跃仍指 t01）；t13 新开不关
+    // 3) new_tab 第 13 个 → 驱逐序按最近使用时刻升序：t02..t04,t06..t12(未跟踪,ts=0,最旧)
+    //    < t01(活跃) < t05 < t13；最旧非活跃 = t02 → 关 t02；t01 活跃豁免（此刻活跃仍指
+    //    t01）；t05 刚被 read 用过、t13 新开，均不关
     server.onResult("Target.createTarget", { targetId: "t13" });
     list = [...twelve, pageInfo("t13", "about:blank")];
     const p2 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example/new", new_tab: true });
@@ -498,7 +516,7 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     server.fire("Page.loadEventFired", {}, "sess-1");
     const r2 = (await p2) as { tab_id: string };
 
-    expect(closedId).toBe("t05"); // LRU 最旧的非活跃
+    expect(closedId).toBe("t02"); // 最久未用的非活跃（未跟踪 = 最旧，同值取首个）
     expect(server.fake.frames("Target.closeTarget").length).toBe(1);
     expect(r2.tab_id).toBe("t13"); // 新 tab 活着且活跃
     const listed = (await toolkit.execute("vibe_seller_browser_tabs", { action: "list" })) as {
@@ -507,6 +525,42 @@ describe("tab LRU：第 13 个 tab 触发关闭", () => {
     expect(listed.tabs.length).toBe(12); // 关回上限内
     expect(listed.tabs.find((t) => t.tab_id === "t13")?.active).toBe(true);
     expect(listed.tabs.find((t) => t.tab_id === "t01")?.active).toBe(false); // 活跃已让位给新 tab
+  });
+
+  it("新开 tab 前只跟踪了活跃 tab → 关最旧的未跟踪 tab，绝不关刚开的新 tab（台账 S3 回归）", async () => {
+    // 旧实现按 Map 插入序驱逐：未跟踪 tab 追加在新 tab 之后 → 序 = [t01(活跃), t13, t02..]，
+    // 跳过活跃后首个就是刚开的 t13，随后 attach 已关闭的 target
+    const twelve = Array.from({ length: 12 }, (_, i) => pageInfo(`t${String(i + 1).padStart(2, "0")}`, `https://x/${i + 1}`));
+    let list = [...twelve];
+    server.on("Target.getTargets", () => ({ targetInfos: list }));
+    server.onResult("Target.attachToTarget", { sessionId: "sess-1" });
+    server.on("Runtime.evaluate", () => ({ result: { value: JSON.stringify({ href: "https://x.example/", title: "T" }) } }));
+
+    // 1) navigate：活跃 = t01（LRU 里只有 t01）
+    const p1 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example" });
+    await until(() => server.fake.frames("Page.navigate").length === 1, "first navigate");
+    server.fire("Page.loadEventFired", {}, "sess-1");
+    await p1;
+
+    // 2) 直接 new_tab 第 13 个 t13（中间不 read 任何 tab）
+    server.onResult("Target.createTarget", { targetId: "t13" });
+    list = [...twelve, pageInfo("t13", "about:blank")];
+    const p2 = toolkit.execute("vibe_seller_browser_navigate", { url: "https://x.example/new", new_tab: true });
+    await until(() => server.fake.frames("Target.closeTarget").length === 1, "closeTarget frame");
+    const closedId = String((server.fake.frames("Target.closeTarget")[0]!.params as { targetId: string }).targetId);
+    list = list.filter((t) => t.targetId !== closedId);
+    await until(() => server.fake.frames("Page.navigate").length === 2, "second navigate");
+    server.fire("Page.loadEventFired", {}, "sess-1");
+    const r2 = (await p2) as { tab_id: string };
+
+    expect(closedId).toBe("t02"); // 未跟踪 = 最旧；刚开的 t13 不在候选前列
+    expect(server.fake.frames("Target.closeTarget").length).toBe(1);
+    expect(r2.tab_id).toBe("t13");
+    const listed = (await toolkit.execute("vibe_seller_browser_tabs", { action: "list" })) as {
+      tabs: Array<{ tab_id: string; active: boolean }>;
+    };
+    expect(listed.tabs.length).toBe(12);
+    expect(listed.tabs.find((t) => t.tab_id === "t13")?.active).toBe(true); // 新 tab 仍在且活跃
   });
 });
 

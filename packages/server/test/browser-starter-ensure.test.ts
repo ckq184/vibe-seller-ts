@@ -9,7 +9,8 @@
 //
 // 测试边界声明：快路径"存活 → touch lastUsedAt → 复用端口"的复用语义由 T3 的 browse
 // 假 starter 行为测试覆盖（sessions Map 模块私有，本文件无注入口）；本文件只钉慢路径与
-// 守卫面。全部零真网（fetchImpl 脚本化 → cdpAlive 可控）、零真 Chrome：VIBE_CHROME_PATH
+// 守卫面（例外：文末"快路径补会话行"一条，经恒 ok 探针驱动真实 peek 命中路径）。
+// 全部零真网（fetchImpl 脚本化 → cdpAlive 可控）、零真 Chrome：VIBE_CHROME_PATH
 // 指向 process.execPath（node.exe）——spawn 成功拿到 pid 后进程立刻因非法参数退出，
 // startChrome 的"spawn 即返回 session"语义保持完整，且绝无真 Chrome/真 CDP 监听。
 
@@ -240,5 +241,35 @@ describe("peekCdpPort touch ↔ sweepIdleBrowsers（PRD §六.5 直接证据）"
     await st.sweepIdleBrowsers(1);
     // sessions Map 模块私有，从外部观察"被清"的可行表达 = peek 二次返回 null
     expect(await st.peekCdpPort(store.id)).toBeNull();
+  });
+});
+
+// ── 快路径补会话行（台账 S8，starter.ts ensureStoreChrome 快路径）──
+// peek 命中但 browser_sessions 行陈旧（就绪超时后 Chrome 迟到就绪 / 行被复位）→ 快路径
+// upsert 回 running + 当前端口；快路径拿不到 pid，chrome_pid 由 markSessionRow 的 COALESCE
+// 保留，不得被清掉（进程号缺口另记台账）。
+
+describe("ensureStoreChrome 快路径：peek 命中且行陈旧 → 补写会话行（台账 S8）", () => {
+  it("慢路径落 running 行 → 行被置 idle → 再 ensure（快路径）：回到 running、cdp_port = 返回端口、chrome_pid 不变", async () => {
+    const st = new BrowserStarter({
+      config,
+      db,
+      fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch,
+    });
+    const store = { id: "st-fast-heal", name: "快路径补行店" };
+    // 慢路径建会话与 running 行（假 Chrome = process.execPath，见文件头）
+    const first = await st.ensureStoreChrome(store, true);
+    const before = sessionRow(store.id);
+    expect(before.status).toBe("running");
+    expect(before.chrome_pid).not.toBeNull();
+    // 模拟行陈旧（就绪超时后迟到就绪 / 行停留非 running 态）
+    db.prepare("UPDATE browser_sessions SET status = 'idle' WHERE store_id = ?").run(store.id);
+    // 恒 ok 探针 → peek 命中 → 快路径
+    const second = await st.ensureStoreChrome(store, true);
+    expect(second.cdpPort).toBe(first.cdpPort); // 同一实例复用
+    const after = sessionRow(store.id);
+    expect(after.status).toBe("running");
+    expect(after.cdp_port).toBe(second.cdpPort);
+    expect(after.chrome_pid).toBe(before.chrome_pid); // COALESCE 保留，快路径不清 pid
   });
 });

@@ -11,10 +11,12 @@
 // 懒启动 headless Chrome → BrowseToolkit 走 navigate→read→act(click)→eval→回填
 //（把 read 到的数据 + eval 结果 node:fs 直写 tmp home 下 stores/<slug>/SMOKE_RESULT.md
 // ——workspace 回填的完整语义已由 write_workspace_file 既有测试钉死，此处只证
-// "读到的数据能落盘"）。冷启动竞态按 PRD §5.2 处理：Chrome 开 CDP 端口约需 2s+，
-// 首次调用允许一次连接错误，peekCdpPort 只读轮询待端口开后走第二次调用懒恢复。
-// 清理：从 browser_sessions 读 chrome_pid 杀浏览器（Windows 下主进程死则渲染进程
-// 随之退出）→ 关 http server → rm tmp 目录；全程容错（进程可能已退）。
+// "读到的数据能落盘"）。冷启动：Chrome 开 CDP 端口约需 2s+，由 starter 慢路径的有界
+// 就绪等待（waitForCdpReadiness，端口就绪才返回）兜住——首次 navigate 直接成功，
+// 不再需要连接错误兜底与 peekCdpPort 轮询。
+// 清理：从 browser_sessions 读 chrome_pid 杀浏览器（首次 navigate 后、任何断言前即采集，
+// navigate 抛错也照采；Windows 下主进程死则渲染进程随之退出）→ 关 http server → rm tmp
+// 目录；全程容错（进程可能已退）。
 
 import { afterAll, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
@@ -191,37 +193,27 @@ describe.skipIf(!process.env.VIBE_BROWSER_SMOKE || !chromePath)("真实浏览器
       const starter = new BrowserStarter({ config, db });
       const toolkit = new BrowseToolkit({ db, starter, headless: () => true }, TASK_ID);
 
-      // navigate → load_state "loaded" + title/url 正确。
-      // 冷启动竞态（实测，PRD §5.2 明文许可面）：Chrome 从 spawn 到开出 CDP 端口约 2s+，
-      // ensureStoreChrome 慢路径 spawn 后即返回 → 首次工具调用的 /json/version 可能
-      // ECONNREFUSED，按 §5.2"本次返回连接错误；下次调用懒恢复"处理——用只读的
-      // peekCdpPort 轮询等端口真正打开（绝不走 ensure：避免过早重试把未就绪 Chrome
-      // kill 重拉的 churn），再走第二次 navigate（快路径 peek 命中 → 复用）。
+      // navigate → load_state "loaded" + title/url 正确。首调直接调用：ensureStoreChrome
+      // 慢路径 spawn 后做有界就绪等待（CDP 端口就绪才返回），冷启动"端口未开"不再外露。
       type NavResult = { tab_id: string; url: string; title: string; load_state: string };
       let nav: NavResult;
       try {
         nav = (await toolkit.execute("vibe_seller_browser_navigate", { url })) as NavResult;
-      } catch (coldStartErr) {
-        const msg = String((coldStartErr as Error).message ?? coldStartErr);
-        if (!/fetch failed|ECONNREFUSED|json\/version/i.test(msg)) throw coldStartErr;
-        const deadline = Date.now() + 30_000;
-        let port: number | null = null;
-        while (port === null && Date.now() < deadline) {
-          port = await starter.peekCdpPort(STORE_ID);
-          if (port === null) await new Promise((r) => setTimeout(r, 250));
-        }
-        if (port === null) throw coldStartErr; // 30s 仍无端口：如实失败
-        nav = (await toolkit.execute("vibe_seller_browser_navigate", { url })) as NavResult;
+      } finally {
+        // 先取 chrome_pid 供清理——不依赖 navigate 成败、早于任何断言：用例中途失败
+        //（含 navigate 本身抛错）afterAll 也能杀掉浏览器，不留进程泄漏；行可能未落，容错
+        const pidRow = db.prepare("SELECT chrome_pid FROM browser_sessions WHERE store_id = ?").get(STORE_ID) as
+          | { chrome_pid: number | null }
+          | undefined;
+        chromePid = pidRow?.chrome_pid;
       }
 
-      // 会话行已落（ensureStoreChrome 慢路径写入）：先取 chrome_pid 供清理——
-      // 故意放在断言之前，用例中途失败 afterAll 也能杀掉浏览器，不留进程泄漏
-      const row = db.prepare("SELECT chrome_pid, cdp_port, status FROM browser_sessions WHERE store_id = ?").get(STORE_ID) as {
-        chrome_pid: number | null; cdp_port: number | null; status: string;
+      // 会话行已落（ensureStoreChrome 慢路径就绪后写入）
+      const row = db.prepare("SELECT cdp_port, status FROM browser_sessions WHERE store_id = ?").get(STORE_ID) as {
+        cdp_port: number | null; status: string;
       };
       expect(row.status).toBe("running");
       expect(row.cdp_port).toBeGreaterThan(0);
-      chromePid = row.chrome_pid;
 
       expect(nav.load_state).toBe("loaded");
       expect(nav.title).toBe(PAGE_TITLE);

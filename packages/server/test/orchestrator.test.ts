@@ -156,9 +156,16 @@ describe("编排 e2e", () => {
     const obs = observationsFor(taskId);
     expect(obs.some((o) => o.tool === "update_price" && o.ok === "success")).toBe(true);
 
-    // 拒绝路径
+    // 拒绝路径（独立脚本：拒绝后模型 respond 一句拒绝说明）
+    const DENY_REPLY = "用户拒绝了调价，价格保持原样。";
     const taskId2 = await createTask("拒价");
-    engines.set(taskId2, { decisions: GATED, gated: ["update_price"] });
+    engines.set(taskId2, {
+      decisions: [
+        { kind: "call_tool", intent: { name: "update_price", arguments: { sku: "A-1" } } },
+        { kind: "respond", content: DENY_REPLY },
+      ],
+      gated: ["update_price"],
+    });
     await post(`/api/tasks/${taskId2}/start`);
     const pending2 = await waitFor(() => {
       const p = deps.bus.history.filter((e) => e.type === "task_questions" && e.data.task_id === taskId2);
@@ -170,6 +177,11 @@ describe("编排 e2e", () => {
     const obs2 = observationsFor(taskId2);
     expect(obs2.some((o) => o.tool === "update_price" && o.ok === "denied")).toBe(true);
     expect(obs2.some((o) => o.tool === "update_price" && o.ok === "success")).toBe(false);
+    // 台账 S9 回归钉：拒绝后的 respond 文本既是 result 也落 transcript_tail（submitted_result
+    // 为空是正常态——模型没调 set_task_result；GET 任务接口按原版不回 transcript_tail）
+    expect(final2.result).toBe(DENY_REPLY);
+    const tail2 = deps.db.prepare("SELECT transcript_tail FROM tasks WHERE id = ?").get(taskId2) as { transcript_tail: string | null };
+    expect(tail2.transcript_tail).toBe(DENY_REPLY);
   });
 
   it("stop：挂起中停止 → stopped_by_user → FAILED（无交付物）", async () => {

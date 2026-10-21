@@ -30,7 +30,7 @@
 import type { ToolCallResult, ToolIntent, ToolPort } from "@vibe/core";
 import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
-import { BROWSE_TOOL_NAMES } from "../browser/browse";
+import { isBrowseToolName } from "../browser/browse";
 import { createSessionToken, SERVICE_TOKEN_EXPIRE_SECONDS } from "../jwt";
 
 export interface McpToolDef {
@@ -545,7 +545,6 @@ export const MCP_TOOL_SCHEMAS: McpToolDef[] = [
 // description = 模型面向审计契约（全英文），语义按 PRD：数据提取只走 read/eval 绝不
 // 截图（§七.5）；互动失败绝不自动重试（§4.2 铁律）；session 由服务端解析——参数面
 // 没有 URL/端口/连接端点（§二"防串店"语义）。
-const isBrowseToolName = (name: string): boolean => (BROWSE_TOOL_NAMES as readonly string[]).includes(name);
 
 const BROWSE_SESSION_PROP = {
   type: "string",
