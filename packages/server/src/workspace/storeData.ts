@@ -39,6 +39,14 @@ export const WORKSPACE_CLAUDE_MD =
 // ── store_slug（browser/wrapper.py）──
 // ASCII-only slug（BU_NAME 约束 [A-Za-z0-9_-]{1,64}）；非中文名 ASCII 归约为空时
 // 回退 store-<id 前 8 位>。
+// 店铺 slug 命名规则的单一来源（路线 4 T2 / S1 收敛了 5 份本地拷贝）：店铺工作区
+// stores/<slug>/ 与浏览器 profile 目录都按它命名。browser/starter.ts 的
+// storeSessionIdentity 是建在它之上的浏览器会话身份层：入组店（share_group）用
+// `_shared-<组>`，未入组店用 storeSlug(name, id)。
+// 旧目录迁移说明：批次 4.7.2（f239e4f）之前，TS 侧 routes_tasks/reapers 的本地 slug
+// 恒拼 id 后缀（`<归约名>-<id 前 8 位>`），那时建的店铺工作区目录名与本规则不一致。
+// 仓库里没有自动迁移（店铺改名按本规则找旧目录，找不到就跳过搬迁），这类目录需手动
+// 把 stores/<旧名>-<id8>/ 改名为本规则算出的 slug。
 
 export function storeSlug(name: string, storeId?: string): string {
   const slug = name

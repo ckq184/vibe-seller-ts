@@ -9,6 +9,7 @@ import type { ServerConfig } from "./config";
 import { WorkspaceManager } from "./workspace/manager";
 import { KnowledgeSyncManager, SkillsSyncManager } from "./workspace/sync";
 import { WorkspaceAssistantManager } from "./workspace/assistant";
+import { storeSlug } from "./workspace/storeData";
 import { WORKSPACE_ASSISTANT_PROMPT } from "./workspace/assistantPrompt";
 import { DEFAULT_PROFILE_ID } from "./profiles/presets";
 
@@ -221,13 +222,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: WorkspaceDeps): void {
       if (stores.length > 0) {
         storesList = stores
           .map((s) => {
-            const slug =
-              s.name
-                .toLowerCase()
-                .replace(/[^a-zA-Z0-9_-]/g, "-")
-                .replace(/_/g, "-")
-                .replace(/-+/g, "-")
-                .replace(/^-+|-+$/g, "") || `store-${s.id.slice(0, 8)}`;
+            const slug = storeSlug(s.name, s.id);
             const backend = s.browser_backend || "chrome";
             return `- **${s.name}** (slug: \`${slug}\`, backend: ${backend})`;
           })

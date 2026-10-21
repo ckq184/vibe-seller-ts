@@ -17,6 +17,7 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { ZiniaoNormalModeError, ensureZiniaoRunning, killAndRelaunchZiniao, type ZiniaoUserInfo } from "./ziniao";
+import { storeSlug } from "../workspace/storeData";
 
 type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -271,7 +272,7 @@ export class BrowserStarter {
       existing.lastUsedAt = Date.now();
       return { ok: true, proxy_port: existing.cdpPort, ws: `ws://127.0.0.1:${existing.cdpPort}/client-aux` };
     }
-    const session = await startChrome(`aux:${store.id}`, { slug: `${storeSlugOf(store.name, store.id)}-aux`, headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
+    const session = await startChrome(`aux:${store.id}`, { slug: `${storeSlug(store.name, store.id)}-aux`, headless, profileRoot: this.profileRoot, fetchImpl: this.deps.fetchImpl });
     return { ok: true, proxy_port: session.cdpPort!, ws: `ws://127.0.0.1:${session.cdpPort}/client-aux` };
   }
 
@@ -448,16 +449,6 @@ export async function forceRelaunchZiniao(creds: { socket_port: number; client_p
 
 export { ZiniaoNormalModeError };
 
-function storeSlugOf(name: string, id: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-zA-Z0-9_-]/g, "-")
-    .replace(/_/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || `store-${id.slice(0, 8)}`;
-}
-
 export interface StoreIdentityInput {
   id: string;
   name: string;
@@ -485,7 +476,7 @@ export function storeSessionIdentity(store: StoreIdentityInput): StoreSessionIde
   if (typeof group === "string" && group !== "") {
     return { key: `${SHARED_KEY_PREFIX}${group}`, slug: `_shared-${group}` };
   }
-  return { key: store.id, slug: storeSlugOf(store.name, store.id) };
+  return { key: store.id, slug: storeSlug(store.name, store.id) };
 }
 
 /** 组成员表（group → 成员 store_id 列表），从 stores 全量小表解析（每次 sweep 重建，

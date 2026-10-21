@@ -7,7 +7,7 @@
 //   3. server bundle：scripts/build-server.mjs → dist/server.mjs（单文件全内联）；
 //   4. 组装 release/vibe-seller-ts/：
 //      { server.mjs, frontend/（dist 内容）, node/node.exe, start.bat, stop.bat,
-//        README-UPGRADE.md, package.json（telemetry 根包定位用） }
+//        README-UPGRADE.md, package.json（版本号根包定位用） }
 //      node.exe：NODE_ZIP env 指定官方 win-x64 zip 则解压嵌入；否则复制本机
 //      node.exe 并在 README-UPGRADE 注明版本要求（≥22.5，node:sqlite）。
 //
@@ -116,7 +116,7 @@ if (nodeProbe.error || typeof nodeProbe.stdout !== "string") {
 }
 const nodeVersion = nodeProbe.stdout.trim();
 
-// telemetry 根包定位（telemetry/core.ts 逐级向上找 name === "vibe-seller-ts" 的
+// 版本号根包定位（src/version.ts 逐级向上找 name === "vibe-seller-ts" 的
 // package.json；release 树无仓库根，随包放一份安装元数据——等价原 Python
 // importlib.metadata 的安装态，version 单一事实源 = 本仓根 package.json）。
 const rootPkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -242,7 +242,7 @@ vibe-seller-ts/
   start.bat           # 后台启动（pid 文件 + 日志落 $VIBE_HOME/logs）
   stop.bat            # 按 pid 停止（先校验映像名仍是 node.exe 才杀；pid 已被复用/
                       # 进程已换时只清 pid 文件、绝不杀）
-  package.json        # 安装元数据（遥测版本号解析用，勿删）
+  package.json        # 安装元数据（版本号解析用：/api/version 与遥测，勿删）
   README-UPGRADE.md   # 本文件
 \`\`\`
 
@@ -291,7 +291,7 @@ jwt_secret、install_id、profiles.json、channels.json、email_dbs、workspace 
 | JWT_SECRET | 无 | 覆盖 JWT 密钥（缺省用 data/jwt_secret 文件，首次启动自动生成） |
 | ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_EMAIL | admin / admin / admin@vibe-seller.local | 首启 admin 种子凭据 |
 | VIBE_SELLER_TELEMETRY | 未设 | 设为 0 关闭匿名遥测 |
-| VIBE_VERSION | 0.1.0 | 版本号上报覆盖（一般不用设） |
+| VIBE_VERSION | 包内 package.json 的 version | 版本号上报覆盖（一般不用设） |
 `,
 );
 

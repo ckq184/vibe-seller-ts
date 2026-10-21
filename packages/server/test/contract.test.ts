@@ -10,7 +10,7 @@ import { openDb, seed, getSetting } from "../src/db";
 import { EventBus } from "../src/bus";
 import { createSessionToken } from "../src/jwt";
 import type { ServerConfig } from "../src/config";
-import { DEFAULT_USER_ID } from "../src/config";
+import { AI_BOT_USER_ID, DEFAULT_USER_ID } from "../src/config";
 
 // Python bcrypt 生成的哈希（rounds=10, prefix 2b，明文 "admin"）——
 // 原地升级兼容钉子：TS 侧必须能验证 Python 建的用户口令。
@@ -232,6 +232,115 @@ describe("users 契约（admin）", () => {
     const dup = await app.request("/api/users", { method: "POST", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ username: "admin", password: "pw" }) });
     expect(dup.status).toBe(400);
     expect(await dup.json()).toEqual({ detail: "Username already in use" });
+  });
+});
+
+// 路线 4 T2 / S2：PUT /api/users/:id 逐分支对齐原 users.py update_user +
+// schemas/user.py UserUpdate（判定序：username 校验 422 → 404 → ai_bot 400 →
+// username/email 排除自身的跨列唯一性 400 → role 白名单 400 → 唯一约束兜底 400）。
+describe("users PUT 对齐原版 update_user", () => {
+  const put = (id: string, body: unknown) =>
+    app.request(`/api/users/${id}`, { method: "PUT", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify(body) });
+  const createUser = async (username: string, email?: string): Promise<{ id: string } & Record<string, unknown>> => {
+    const res = await app.request("/api/users", { method: "POST", headers: { cookie: adminCookie, "content-type": "application/json" }, body: JSON.stringify({ username, email, password: "pw123" }) });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { id: string } & Record<string, unknown>;
+  };
+  const usernameError = (input: string, msg: string) => ({
+    detail: [{ type: "value_error", loc: ["body", "username"], msg: `Value error, ${msg}`, input, ctx: { error: {} } }],
+  });
+
+  it("非法 username → 422（形状同 POST，input 为校验前原始值），且先于 404", async () => {
+    // 不存在的用户 + 非法 username：FastAPI 进路由前就校验 body，是 422 不是 404
+    const missing = await put("00000000-0000-0000-0000-0000000000fa", { username: "a@b.com" });
+    expect(missing.status).toBe(422);
+    expect(await missing.json()).toEqual(usernameError("a@b.com", "Username must not contain @"));
+    const u = await createUser("put-422");
+    const short = await put(u.id, { username: " Ab " });
+    expect(short.status).toBe(422);
+    expect(await short.json()).toEqual(usernameError(" Ab ", "Username must be 3-50 characters"));
+    const chars = await put(u.id, { username: "bad name" });
+    expect(chars.status).toBe(422);
+    expect(await chars.json()).toEqual(usernameError("bad name", "Username: only a-z, 0-9, _, -"));
+  });
+
+  it("合法 username 存 strip + lower 后的值；改成自己现名不算占用", async () => {
+    const u = await createUser("put-rename");
+    const renamed = await put(u.id, { username: "  Put-Renamed  " });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({ username: "put-renamed" });
+    const same = await put(u.id, { username: "put-renamed" });
+    expect(same.status).toBe(200);
+  });
+
+  it("目标是 ai_bot 用户 → 400 Cannot modify AI bot user", async () => {
+    const res = await put(AI_BOT_USER_ID, { is_active: false });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ detail: "Cannot modify AI bot user" });
+  });
+
+  it("username 撞其他用户的 username 或 email → 400 Username already in use", async () => {
+    const a = await createUser("put-dup-a");
+    const b = await createUser("put-dup-b");
+    const byName = await put(b.id, { username: "put-dup-a" });
+    expect(byName.status).toBe(400);
+    expect(await byName.json()).toEqual({ detail: "Username already in use" });
+    // 原 _check_identifier_unique 是 username==v OR email==v：撞他人的 email 列同样拒
+    deps.db.prepare("UPDATE users SET email = ? WHERE id = ?").run("put-dup-mail", a.id);
+    const byEmail = await put(b.id, { username: "put-dup-mail" });
+    expect(byEmail.status).toBe(400);
+    expect(await byEmail.json()).toEqual({ detail: "Username already in use" });
+  });
+
+  it("email：撞他人 → 400；撞自己不算；不带 email 键不动；显式 null 清空", async () => {
+    await createUser("put-mail-a", "mail-a@x.com");
+    const b = await createUser("put-mail-b", "mail-b@x.com");
+    const dupEmail = await put(b.id, { email: "mail-a@x.com" });
+    expect(dupEmail.status).toBe(400);
+    expect(await dupEmail.json()).toEqual({ detail: "Email already in use" });
+    const dupUsername = await put(b.id, { email: "admin" });
+    expect(dupUsername.status).toBe(400);
+    expect(await dupUsername.json()).toEqual({ detail: "Email already in use" });
+    const self = await put(b.id, { email: "mail-b@x.com" });
+    expect(self.status).toBe(200);
+    const untouched = await put(b.id, { is_active: true });
+    expect(await untouched.json()).toMatchObject({ email: "mail-b@x.com" });
+    const cleared = await put(b.id, { email: null });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ email: null });
+  });
+
+  it("role 不在 admin/member → 400 Invalid role", async () => {
+    const u = await createUser("put-role");
+    for (const role of ["superuser", "ai_bot", ""]) {
+      const res = await put(u.id, { role });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ detail: "Invalid role" });
+    }
+  });
+
+  it("null 视为没给（原版 is not None）：username/role/password/is_active 为 null 一律不动", async () => {
+    const u = await createUser("put-null");
+    const res = await put(u.id, { username: null, role: null, password: null, is_active: null });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ username: "put-null", role: "member", is_active: true });
+    await login("put-null", "pw123"); // 口令未被改写
+  });
+
+  it("UPDATE 撞唯一约束（防御兜底，模拟并发写入）→ 400 Username or email already in use，不 500", async () => {
+    const u = await createUser("put-race");
+    // 预检通过后、UPDATE 时才冲突的窗口无法经 API 构造：用临时触发器让 UPDATE 抛约束错误
+    deps.db.exec(
+      "CREATE TEMP TRIGGER put_race_guard BEFORE UPDATE ON main.users WHEN NEW.username = 'put-race-2' " +
+        "BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: users.username'); END;",
+    );
+    try {
+      const res = await put(u.id, { username: "put-race-2" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ detail: "Username or email already in use" });
+    } finally {
+      deps.db.exec("DROP TRIGGER put_race_guard");
+    }
   });
 });
 

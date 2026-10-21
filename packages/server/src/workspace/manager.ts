@@ -11,7 +11,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { randomBytes } from "node:crypto";
 import { HttpError } from "../types";
 import { rejectWrongStubs } from "./catalog";
-import { WORKSPACE_CLAUDE_MD, collectStoreEntries, migrateStoreData, storeSlug, writeCatalogStub } from "./storeData";
+import { WORKSPACE_CLAUDE_MD, collectStoreEntries, migrateStoreData, writeCatalogStub } from "./storeData";
 
 /** 落盘前替换孤立代理对（U+D800-U+DFFF）为 U+FFFD（app/text_utils.sanitize_text）。 */
 export function sanitizeText(text: string): string {

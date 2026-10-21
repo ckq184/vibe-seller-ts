@@ -114,6 +114,34 @@ function truncate72(plain: string): string {
   return bytes.subarray(0, 72).toString("utf8");
 }
 
+/** 原 schemas/user.py _validate_username（UserCreate/UserUpdate 共用）：strip().lower()
+ * 后要求 3-50 位、无 @、[a-z0-9_-]；返回归一化值与错误文案（null = 合法）。 */
+function validateUsername(input: string): { username: string; error: string | null } {
+  const username = input.trim().toLowerCase();
+  const error =
+    username.length < 3 || username.length > 50
+      ? "Username must be 3-50 characters"
+      : username.includes("@")
+        ? "Username must not contain @"
+        : /^[a-z0-9_-]+$/.test(username)
+          ? null
+          : "Username: only a-z, 0-9, _, -";
+  return { username, error };
+}
+
+/** field_validator 抛 ValueError 时 FastAPI 的 422 body；input 是校验前的原始值。 */
+function usernameValueError(input: string, error: string) {
+  return { detail: [{ type: "value_error", loc: ["body", "username"], msg: `Value error, ${error}`, input, ctx: { error: {} } }] };
+}
+
+/** node:sqlite 约束类错误（主码 SQLITE_CONSTRAINT=19，含 UNIQUE/NOT NULL 等扩展码）——
+ * 对齐 SQLAlchemy 的 IntegrityError 面；无 errcode 的运行时退回看错误文案。 */
+function isSqliteConstraintError(err: unknown): boolean {
+  const errcode = (err as { errcode?: unknown }).errcode;
+  if (typeof errcode === "number") return (errcode & 0xff) === 19;
+  return err instanceof Error && /constraint failed/.test(err.message);
+}
+
 function serverTimezone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -409,25 +437,8 @@ export function createApp(deps: AppDeps): Hono {
     // user_create_username_eq_email_422 钉死（此前 TS 无校验，会把带 @ 的
     // username 当普通字符串建号）。
     const usernameInput = String(body.username);
-    const username = usernameInput.trim().toLowerCase();
-    const invalidUsername =
-      username.length < 3 || username.length > 50
-        ? "Username must be 3-50 characters"
-        : username.includes("@")
-          ? "Username must not contain @"
-          : /^[a-z0-9_-]+$/.test(username)
-            ? null
-            : "Username: only a-z, 0-9, _, -";
-    if (invalidUsername) {
-      return c.json(
-        {
-          detail: [
-            { type: "value_error", loc: ["body", "username"], msg: `Value error, ${invalidUsername}`, input: usernameInput, ctx: { error: {} } },
-          ],
-        },
-        422,
-      );
-    }
+    const { username, error: invalidUsername } = validateUsername(usernameInput);
+    if (invalidUsername) return c.json(usernameValueError(usernameInput, invalidUsername), 422);
     // 原 users.py create_user：跨列唯一性检查在 INSERT 前做，冲突恒 400
     //（'Username already in use' / 'Email already in use'）——批次 4.7.2 录制
     // 回放对齐（此前 TS 误用 409，原实现只有 email-accounts 复用才是 409）。
@@ -459,26 +470,55 @@ export function createApp(deps: AppDeps): Hono {
   app.put("/api/users/:user_id", async (c) => {
     requireAdmin(c, auth);
     const userId = c.req.param("user_id");
+    // 原 users.py update_user + schemas/user.py UserUpdate（路线 4 T2 / S2）：字段
+    // "给了"= 原版 `is not None`（缺键与 null 都算没给）；只有 email 按键是否出现
+    // 判定（model_fields_set），显式 null = 清空。
+    const body = (await c.req.json().catch(() => ({}))) as {
+      username?: string | null;
+      email?: string | null;
+      password?: string | null;
+      role?: string | null;
+      is_active?: boolean | null;
+    };
+    // username 校验是 UserUpdate 的 field_validator，FastAPI 进路由前就跑：不存在的
+    // 用户 + 非法 username 也是 422（先于 404），形状同 POST；存库用校验后的值。
+    let username: string | null = null;
+    if (body.username != null) {
+      const usernameInput = String(body.username);
+      const checked = validateUsername(usernameInput);
+      if (checked.error) return c.json(usernameValueError(usernameInput, checked.error), 422);
+      username = checked.username;
+    }
     const target = getUserById(db, userId);
     if (!target) throw new HttpError(404, "User not found");
-    const body = (await c.req.json().catch(() => ({}))) as {
-      username?: string;
-      email?: string;
-      password?: string;
-      role?: string;
-      is_active?: boolean;
-    };
-    db.prepare(
-      "UPDATE users SET username = ?, email = ?, password_hash = ?, role = ?, is_active = ?, updated_at = ? WHERE id = ?",
-    ).run(
-      body.username?.toLowerCase() ?? target.username,
-      body.email ?? target.email,
-      body.password ? hashPassword(body.password) : target.password_hash,
-      body.role ?? target.role,
-      body.is_active === undefined ? target.is_active : body.is_active ? 1 : 0,
-      nowIso(),
-      userId,
-    );
+    if (target.role === "ai_bot") throw new HttpError(400, "Cannot modify AI bot user");
+    // 原 _check_identifier_unique(db, value, exclude_user_id)：username==v OR email==v
+    // 且排除自己，查到即占用
+    const takenByOther = (value: string) =>
+      db.prepare("SELECT id FROM users WHERE (username = ? OR email = ?) AND id != ?").get(value, value, userId) !== undefined;
+    if (username !== null && takenByOther(username)) throw new HttpError(400, "Username already in use");
+    const emailGiven = Object.prototype.hasOwnProperty.call(body, "email");
+    const email = emailGiven ? (body.email ?? null) : target.email;
+    if (emailGiven && email !== null && takenByOther(email)) throw new HttpError(400, "Email already in use");
+    if (body.role != null && body.role !== "admin" && body.role !== "member") throw new HttpError(400, "Invalid role");
+    const passwordHash = body.password != null ? hashPassword(body.password) : target.password_hash;
+    try {
+      db.prepare(
+        "UPDATE users SET username = ?, email = ?, password_hash = ?, role = ?, is_active = ?, updated_at = ? WHERE id = ?",
+      ).run(
+        username ?? target.username,
+        email,
+        passwordHash,
+        body.role ?? target.role,
+        body.is_active == null ? target.is_active : body.is_active ? 1 : 0,
+        nowIso(),
+        userId,
+      );
+    } catch (err) {
+      // 原实现 commit 撞 IntegrityError（预检与写入之间的并发窗口）→ 400，不得 500
+      if (isSqliteConstraintError(err)) throw new HttpError(400, "Username or email already in use");
+      throw err;
+    }
     return c.json(userResponse(getUserById(db, userId)!));
   });
 

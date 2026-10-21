@@ -129,7 +129,7 @@ let pageServer: Server | null = null;
 let chromePid: number | null | undefined;
 
 const STORE_ID = "st-smoke";
-const STORE_NAME = "smoke-store"; // 已是 slug 安全字符 → storeSlugOf 原样返回
+const STORE_NAME = "smoke-store"; // 已是 slug 安全字符 → storeSlug 原样返回
 const TASK_ID = "task-smoke";
 
 afterAll(async () => {

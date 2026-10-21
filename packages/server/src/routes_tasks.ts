@@ -17,6 +17,7 @@ import { profileKindForId } from "./telemetry/tasks";
 import type { TaskOrchestrator } from "./agent/orchestrator";
 import type { ServerConfig } from "./config";
 import { readTextSync, writeTextSync } from "./workspace/textio";
+import { storeSlug } from "./workspace/storeData";
 
 export interface TaskDeps {
   config: ServerConfig;
@@ -124,20 +125,6 @@ function replaceNameInMdFiles(directory: string, oldName: string, newName: strin
     }
   };
   walk(directory);
-}
-
-function storeSlug(name: string, id: string): string {
-  // 原 browser/wrapper.py store_slug：ASCII 归约非空时直接用归约名（无后缀），
-  // 仅归约为空才回退 store-<id 前 8 位>。批次 4.7.2 录制回放对齐——此前恒拼
-  // id 后缀，店铺工作区目录名与原实现漂移（replay-store-renamed vs
-  // replay-store-renamed-c82f5251）。
-  const base = name
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-")
-    .replace(/_/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return base || `store-${id.slice(0, 8)}`;
 }
 
 function storeResponse(s: StoreRow): Record<string, unknown> {

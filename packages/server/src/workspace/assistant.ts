@@ -14,6 +14,7 @@ import { AgentRuntime, JsonlRunLog, MemorySessionStore, type RunHandle } from "@
 import { createTranslator, defaultBudget, type RunFactoryResult } from "@vibe/bridge";
 import type { EngineFactory } from "../agent/orchestrator";
 import type { ServerConfig } from "../config";
+import { storeSlug } from "./storeData";
 
 interface AssistantDeps {
   config: ServerConfig;
@@ -185,7 +186,7 @@ export function buildWorkspaceAssistantSystemPrompt(stores: { name: string; id: 
   if (stores.length > 0) {
     storesList = stores
       .map((s) => {
-        const slug = storeSlugSafe(s.name, s.id);
+        const slug = storeSlug(s.name, s.id);
         const backend = s.browser_backend || "chrome";
         return `- **${s.name}** (slug: \`${slug}\`, backend: ${backend})`;
       })
@@ -194,14 +195,4 @@ export function buildWorkspaceAssistantSystemPrompt(stores: { name: string; id: 
     storesList = "_No stores configured yet._";
   }
   return WORKSPACE_ASSISTANT_PROMPT.replace("{stores_list}", storesList);
-}
-
-function storeSlugSafe(name: string, storeId: string): string {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-zA-Z0-9_-]/g, "-")
-    .replace(/_/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || `store-${storeId.slice(0, 8)}`;
 }

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { APP_VERSION } from "./version";
 
 export interface ServerConfig {
   homeDir: string;
@@ -46,7 +47,8 @@ export function readServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     adminEmail: env.ADMIN_EMAIL ?? "admin@vibe-seller.local",
     adminPassword: env.ADMIN_PASSWORD ?? "admin",
     adminUsername: (env.ADMIN_USERNAME ?? "admin").toLowerCase(),
-    version: env.VIBE_VERSION ?? "0.0.0+dev",
+    // 缺省与遥测同源（根 package.json 的 version，见 ./version）；VIBE_VERSION 仅作显式覆盖
+    version: env.VIBE_VERSION ?? APP_VERSION,
     jwtSecret: env.JWT_SECRET || undefined,
   };
 }

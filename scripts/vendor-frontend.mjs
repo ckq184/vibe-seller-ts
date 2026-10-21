@@ -25,11 +25,6 @@ const dest = join(root, "frontend");
 const manifestPath = join(root, "scripts", "frontend-vendor-manifest.json");
 const EXCLUDED_DIRS = new Set(["node_modules", "dist"]); // 绝不进 vendor：依赖与构建产物
 
-if (!existsSync(join(source, "package.json"))) {
-  console.error(`[vendor] 来源不是前端目录（缺 package.json）：${source}`);
-  process.exit(1);
-}
-
 /** 相对路径（posix 斜杠）→ sha256；跳过排除目录（任意深度）。 */
 export function hashTree(dir, relPrefix = "") {
   const files = {};
@@ -78,6 +73,12 @@ function check() {
 if (process.argv.includes("--check")) {
   check();
 } else {
+  // 来源检查只在复制模式做：--check 只比对 frontend/ 与清单，用不到来源目录，
+  // 没有参考仓库的机器（换机 / CI）上 vendor:check 与 package 照样能过。
+  if (!existsSync(join(source, "package.json"))) {
+    console.error(`[vendor] 来源不是前端目录（缺 package.json）：${source}`);
+    process.exit(1);
+  }
   if (!existsSync(dest)) mkdirSync(dest, { recursive: true });
   cpSync(source, dest, {
     recursive: true,

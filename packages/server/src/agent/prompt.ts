@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerConfig } from "../config";
+import { storeSlug } from "../workspace/storeData";
 
 export type RunMode = "execute" | "design" | "plan_execute" | "woken" | "chat";
 
@@ -29,12 +30,8 @@ export interface PromptInput {
 
 function storeContext(config: ServerConfig, store: { id: string; name: string } | undefined | null): string {
   if (!store) return "";
-  const base = store.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const slug = `${base || "store"}-${store.id.slice(0, 8)}`;
-  const storeMd = join(config.homeDir, "stores", slug, "STORE.md");
+  // 原 task_runner_context.py：slug = _store_slug(store.name, store.id)，档案在 stores/{slug}/
+  const storeMd = join(config.homeDir, "stores", storeSlug(store.name, store.id), "STORE.md");
   if (existsSync(storeMd)) {
     try {
       return readFileSync(storeMd, "utf8").slice(0, 8000);

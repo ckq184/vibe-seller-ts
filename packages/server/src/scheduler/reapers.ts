@@ -10,6 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_TASK_RETENTION_DAYS } from "../config";
 import { getSetting } from "../db";
 import { ACTIVE, canTransition } from "../task_states";
+import { storeSlug } from "../workspace/storeData";
 import type { SchedulerDeps } from "./fire";
 import { getSchedule, resolveScheduleProfile } from "./fire";
 
@@ -20,18 +21,6 @@ const STALL_ERROR_MESSAGE =
   "Agent stream stalled — no events for 3+ minutes. Upstream provider likely dropped the SSE stream without emitting a stop event. Task was force-failed by stall_reaper. Re-run to retry.";
 const BATCH_RESULTS_FILE = "batch_results.json";
 const RESULTS_POINTER = `\n\n---\nThe results of every store in this batch are in \`./${BATCH_RESULTS_FILE}\` (a JSON object: \`children\` is a list with each store's \`status\` (completed|failed), \`result\`, \`error\`, \`store_slug\`, and \`task_dir\` — the store's own working directory, readable for its outputs). Decide what to do based on those results.`;
-
-function storeSlug(name: string, id: string): string {
-  // 原 browser/wrapper.py store_slug：ASCII 归约非空时无后缀（routes_tasks.storeSlug
-  // 同步修正，批次 4.7.2）；仅归约为空回退 store-<id 前 8 位>。
-  const base = name
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-")
-    .replace(/_/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return base || `store-${id.slice(0, 8)}`;
-}
 
 // ── waiting checker（原 waiting.py，15 分钟） ──
 

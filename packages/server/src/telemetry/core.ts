@@ -6,36 +6,14 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { release } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { PosthogTransport, type TelemetryClient } from "./transport";
+import { APP_VERSION } from "../version";
 
-// 对齐原 APP_VERSION = importlib.metadata.version('vibe-seller')（pyproject 单一事实
-// 源，缺失即安装损坏、响亮报错不做静默兜底）；TS 侧预裁决取仓库根 package.json 的
-// version。定位不能写死上溯级数：源码树里本文件是 <root>/packages/server/src/telemetry/
-//（4 级），打成 bundle（scripts/dev-start.mjs、5.3 的 dist/server.mjs）后深度会变——
-// 从本文件真实位置逐级向上找 name === "vibe-seller-ts" 的 package.json，找不到按
-// 原哲学响亮报错（等价 importlib.metadata.version 缺失）。
-function findRootPackageJson(startFile: string): string {
-  let dir = dirname(startFile);
-  for (;;) {
-    const candidate = join(dir, "package.json");
-    try {
-      if ((JSON.parse(readFileSync(candidate, "utf8")) as { name?: string }).name === "vibe-seller-ts") return candidate;
-    } catch {
-      /* 无 package.json / 非 JSON：继续向上 */
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  throw new Error("vibe-seller-ts 根 package.json 未找到：安装损坏（原 importlib.metadata.version 缺失同款响亮失败）");
-}
-
-export const APP_VERSION: string = (
-  JSON.parse(readFileSync(findRootPackageJson(fileURLToPath(import.meta.url)), "utf8")) as { version: string }
-).version;
+// 版本号单一事实源在叶子模块 ../version（原 app/version.py 同构）；此处原样再导出，
+// 既有调用方的 telemetry.APP_VERSION 不变。
+export { APP_VERSION };
 
 export const POSTHOG_PROJECT_KEY = "phc_NP0EO5Koq1dWqXEHwR14Po7bVqqtAdWINXiWypKU6H7";
 export const POSTHOG_HOST = "https://t.vibe-sellers.com";
